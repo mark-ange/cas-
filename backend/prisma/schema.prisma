@@ -1,0 +1,242 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum Role {
+  RESIDENT
+  WATER_DISPATCHER
+  POWER_DISPATCHER
+  ADMIN
+}
+
+enum ServiceType {
+  WATER
+  POWER
+}
+
+enum Priority {
+  ROUTINE
+  PLANNED
+  URGENT
+  EMERGENCY
+}
+
+enum AdvisoryStatus {
+  SCHEDULED
+  ACTIVE
+  RESOLVED
+  CANCELLED
+}
+
+enum NotificationType {
+  ADVISORY
+  RESTORATION
+  CANCELLATION
+}
+
+enum DeliveryStatus {
+  QUEUED
+  SIMULATED
+  FAILED
+}
+
+// ============================================================================
+// CORE MODELS
+model User {
+  id           String   @id @default(uuid())
+    email        String   @unique @db.VarChar(254)
+  passwordHash String
+  role         Role     @default(RESIDENT)
+  fullName     String   @db.VarChar(80)
+  phone        String?  @db.VarChar(20)
+  active       Boolean  @default(true)
+  privacyConsent    Boolean   @default(false)
+  privacyConsentAt  DateTime?
+
+    residentProfile     ResidentProfile?
+  dispatcherProfile   DispatcherProfile?
+
+  sentAdvisories     Advisory[]
+  receivedNotifications Notification[]
+  sessions           Session[]
+  activityLogs       ActivityLog[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([role])
+  @@index([active])
+}
+
+model ResidentProfile {
+  id         String  @id @default(uuid())
+  userId     String  @unique
+  barangayId String
+  purokId    String?
+  waterOptIn Boolean @default(true)
+  powerOptIn Boolean @default(true)
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  barangay  Barangay  @relation(fields: [barangayId], references: [id])
+  purok     Purok?    @relation(fields: [purokId], references: [id])
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([barangayId, purokId])
+}
+
+model DispatcherProfile {
+  id          String       @id @default(uuid())
+  userId      String       @unique
+  serviceType ServiceType
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([serviceType])
+}
+
+model Barangay {
+  id        String   @id @default(uuid())
+  name      String   @unique @db.VarChar(100)
+  city      String   @default("Cagayan de Oro City") @db.VarChar(100)
+  active    Boolean  @default(true)
+
+  puroks              Purok[]
+  residentProfiles    ResidentProfile[]
+  advisoryTargets     AdvisoryTarget[]
+
+    createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([active])
+}
+
+// ============================================================================
+// ADVISORY MODELS
+// ============================================================================
+
+model Advisory {
+  id                     String          @id @default(uuid())
+  serviceType            ServiceType
+  priority               Priority
+  title                  String          @db.VarChar(200)
+  reason                 String?
+  message                String
+  startAt                DateTime        @db.Timestamptz(6)
+  endAt                  DateTime?       @db.Timestamptz(6)
+  status                 AdvisoryStatus  @default(SCHEDULED)
+  createdById            String
+  publishedAt            DateTime?       @db.Timestamptz(6)
+  canceledAt             DateTime?       @db.Timestamptz(6)
+  cancellationReason     String?
+
+    createdBy              User               @relation(fields: [createdById], references: [id])
+  targets                AdvisoryTarget[]
+  notifications          Notification[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([serviceType])
+  @@index([status])
+  @@index([status, startAt])
+  @@index([createdById])
+}
+
+model AdvisoryTarget {
+  id         String  @id @default(uuid())
+  advisoryId String
+  barangayId String
+  purokId    String?
+
+  advisory  Advisory  @relation(fields: [advisoryId], references: [id], onDelete: Cascade)
+  barangay  Barangay  @relation(fields: [barangayId], references: [id])
+  purok     Purok?    @relation(fields: [purokId], references: [id])
+
+  @@unique([advisoryId, barangayId, purokId])
+  @@index([advisoryId])
+  @@index([barangayId])
+}
+
+model Notification {
+  id                String           @id @default(uuid())
+  advisoryId        String
+  userId            String
+  phoneNumber       String?
+  messageContent    String
+  notificationType  NotificationType
+  deliveryStatus    DeliveryStatus   @default(SIMULATED)
+  createdAt         DateTime         @default(now()) @db.Timestamptz(6)
+  deliveredAt       DateTime?        @db.Timestamptz(6)
+  readAt            DateTime?        @db.Timestamptz(6)
+
+  advisory Advisory @relation(fields: [advisoryId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([advisoryId, userId])
+  @@index([userId, createdAt])
+  @@index([advisoryId])
+}
+
+model ActivityLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  action     String   @db.VarChar(100)
+  entityType String?  @db.VarChar(50)
+  entityId   String?
+  metadata   String?
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([createdAt])
+  @@index([actorId])
+  @@index([entityType, entityId])
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@index([userId])
+  @@index([expiresAt])
+}
+
+model Purok {
+  id         String  @id @default(uuid())
+  name       String  @db.VarChar(100)
+    barangayId String  @db.VarChar(36)
+  active     Boolean @default(true)
+
+  barangay           Barangay            @relation(fields: [barangayId], references: [id])
+  residentProfiles   ResidentProfile[]
+  advisoryTargets  AdvisoryTarget[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+    @@unique([barangayId, name])
+  @@index([barangayId])
+}
+
+// ============================================================================
+// ADVISORY MODELS
