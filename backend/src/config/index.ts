@@ -26,7 +26,7 @@ export const config = {
   databaseUrl: getEnv("DATABASE_URL", "postgresql://postgres:password@localhost:5432/cas_dev?schema=public"),
   jwtSecret: getEnv("JWT_SECRET", "dev-secret-change-me"),
   jwtExpiresIn: getEnv("JWT_EXPIRES_IN", "7d"),
-  corsOrigins: getEnv("CORS_ORIGINS", "http://localhost:5173")
+    corsOrigins: getEnv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
     .split(",")
     .map((o) => o.trim())
     .filter(Boolean),
