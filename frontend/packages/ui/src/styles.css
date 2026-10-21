@@ -1,0 +1,354 @@
+@import "tailwindcss";
+@source "./";
+
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #18253a;
+  background: #f4f7fb;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --brand: #9f1745;
+  --brand-dark: #7d1237;
+  --brand-soft: #fff0f4;
+  --accent: #147b70;
+  --line: #e6ebf1;
+  --muted: #718096;
+}
+
+* { box-sizing: border-box; }
+body { min-width: 320px; min-height: 100vh; margin: 0; background: #f4f7fb; }
+button, input, select, textarea { font: inherit; }
+button { cursor: pointer; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid #5494d3; outline-offset: 2px; }
+.resident-auth { --brand: #64234f; --brand-dark: #4d1a3d; --brand-soft: #f7eff4; }
+.resident-auth-art { background: radial-gradient(ellipse at 15% 10%, rgba(244, 184, 115, .18), transparent 34%), linear-gradient(155deg, #241631 0%, #4d1c4b 58%, #973955 100%); }
+.portal-resident { --brand: #64234f; --brand-dark: #4d1a3d; --brand-soft: #f7eff4; background: #fcf8f6; }
+.portal-resident > header { border-color: #eee6e3; background: #fffdfc; }
+.portal-resident aside { border-color: #eee4df; background: #fff; }
+.portal-resident .active-nav { background: #f7eff4; color: #64234f; }
+.portal-resident .resident-workspace article,
+.portal-resident .resident-profile-card { border-color: #eee4df; box-shadow: 0 2px 8px rgba(50, 30, 42, .025); }
+.resident-advisory-visual { position: relative; isolation: isolate; height: 112px; overflow: hidden; background: linear-gradient(180deg, #f4d6bd, #f8ecdf 65%, #bac6a5 65%, #7d9475); }
+.resident-advisory-visual.compact { height: 130px; }
+.resident-advisory-visual.water { background: linear-gradient(180deg, #c8dbea, #e7edf1 65%, #b5c4b6 65%, #829d87); }
+.visual-sun { position: absolute; top: 16px; right: 14%; width: 22px; height: 22px; border-radius: 50%; background: rgba(251, 186, 104, .85); }
+.visual-hill { position: absolute; bottom: -32px; width: 75%; height: 75px; transform: rotate(-8deg); border-radius: 50% 50% 0 0; background: #85967a; }
+.visual-hill-back { left: -5%; bottom: -39px; background: #a8b29a; }
+.visual-hill-front { right: -20%; transform: rotate(12deg); background: #667f70; }
+.water .visual-hill-back { background: #8eaaae; }
+.water .visual-hill-front { background: #5d8991; }
+.visual-grid-line { position: absolute; z-index: 1; bottom: 20px; left: 13%; width: 74%; height: 1px; background: rgba(255,255,255,.45); box-shadow: 0 -9px 0 rgba(255,255,255,.25), 0 9px 0 rgba(255,255,255,.25); }
+.visual-scene-label { position: absolute; z-index: 2; left: 12px; bottom: 12px; border: 1px solid rgba(255,255,255,.5); border-radius: 999px; background: rgba(37, 32, 43, .58); padding: 4px 8px; color: white; font-size: 7px; font-weight: 700; letter-spacing: .08em; }
+.resident-preference { min-height: 45px; }
+.resident-toggle { position: relative; width: 31px; height: 17px; border-radius: 999px; background: #d5d2d4; transition: background .15s ease; }
+.resident-toggle:after { position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: white; content: ""; transition: transform .15s ease; box-shadow: 0 1px 2px #0002; }
+.resident-preference-input:checked + .resident-toggle { background: #6d2a57; }
+.resident-preference-input:checked + .resident-toggle:after { transform: translateX(14px); }
+.resident-preference-input:focus-visible + .resident-toggle { outline: 3px solid #5494d3; outline-offset: 2px; }
+.resident-community-map { background: radial-gradient(ellipse at 35% 80%, #d3ded2 0 20%, transparent 21%), radial-gradient(ellipse at 75% 35%, #eadfe8 0 23%, transparent 24%), linear-gradient(145deg, #edf0e8, #e9e5ed); }
+.resident-community-map:after { position: absolute; inset: 48% -10%; height: 11px; transform: rotate(-17deg); background: rgba(255,255,255,.7); content: ""; }
+.resident-map-pin { z-index: 1; width: 12px; height: 12px; border: 3px solid white; border-radius: 50%; background: #73345f; box-shadow: 0 2px 5px #2224; }
+.resident-map-pin.power { background: #db8d4e; }
+.resident-map-pin.water { background: #73345f; }
+.resident-map-pin.planned { background: #45526a; }
+.resident-register-card .resident-auth-art { min-height: 530px; }
+.resident-auth-wrap { min-height: calc(100vh - 104px); }
+.resident-auth-card { min-height: 570px; }
+.resident-register-card { min-height: 0; }
+.resident-auth-form { min-width: 0; }
+@media (max-width: 1023px) {
+  .resident-auth-wrap { min-height: 0; }
+  .resident-auth-card, .resident-register-card { min-height: 0; }
+  .resident-auth-art, .resident-register-card .resident-auth-art { min-height: 320px; }
+}
+@media (max-width: 639px) {
+  .resident-auth-art, .resident-register-card .resident-auth-art { min-height: 280px; }
+}
+.portal-water { --brand: #087c91; --brand-dark: #075e70; --brand-soft: #e7f7fa; --accent: #087c91; }
+.portal-water .admin-banner { background: linear-gradient(120deg, #075e70, #087c91 60%, #1c9bab); }
+.portal-water .brand-symbol { background: #087c91; }
+.portal-water .avatar { color: #087c91; background: #e7f7fa; }
+.portal-water .active-nav { background: #e7f7fa; color: #087c91; }
+.portal-water .nav-count { color: #087c91; }
+.portal-water .map-pin { background: #087c91; }
+.portal-water .map-pin.planned { background: #d19a47; }
+.portal-water .map-pin.report { background: #315fc2; }
+.portal-water .progress-fill { background: linear-gradient(90deg, #1da5b7, #087c91); }
+.auth-water { background: radial-gradient(ellipse at 82% 25%, rgba(255,255,255,.15), transparent 32%), linear-gradient(145deg, #075e70, #087c91 62%, #20a2b2); }
+.auth-water:after { border-color: rgba(255,255,255,.17) !important; }
+.auth-water .brand-symbol { background: rgba(255,255,255,.18); }
+.water-login { --brand: #087c91; --brand-dark: #075e70; --brand-soft: #e7f7fa; }
+.water-login .login-art { background: radial-gradient(ellipse at 82% 25%, rgba(255,255,255,.15), transparent 32%), linear-gradient(145deg, #075e70, #087c91 62%, #20a2b2); }
+.water-login .art-copy .eyebrow { color: #a8edf5; }
+.cepalco-login { --brand: #116f65; --brand-dark: #0c5e55; --brand-soft: #e4f5f2; }
+.cepalco-login .login-art { background: #116f65; }
+.cepalco-login .login-art .brand-symbol { border-radius: 8px; background: rgba(255,255,255,.13); box-shadow: none; }
+.cepalco-login .login-art > div:nth-of-type(2) > p { color: #ffe38a; }
+.cepalco-login .login-art > div:nth-of-type(2) > h1 { max-width: 420px; font-size: clamp(2.1rem, 4vw, 3.4rem); line-height: .99; letter-spacing: -.045em; }
+.cepalco-login .login-art > div:nth-of-type(2) > p:last-child { max-width: 390px; font-size: 12px; line-height: 1.7; }
+.cepalco-login .login-art > div:last-child { max-width: 480px; border-top: 1px solid rgba(255,255,255,.14); padding-top: 18px; }
+.cepalco-login .login-art > div:last-child strong { font-size: 14px; }
+.cepalco-login .brand-symbol { color: #ffe38a; }
+.portal-cepalco { --brand: #116f65; --brand-dark: #0b5c54; --brand-soft: #e4f5f2; --accent: #197d70; background: #f4f8f7; color: #1b2b2d; }
+.portal-cepalco .portal-header { height: 56px; border-color: #e5eeed; padding-inline: 18px; }
+.portal-cepalco .brand-symbol { width: 28px; height: 28px; border-radius: 7px; background: #116f65; box-shadow: none; }
+.portal-cepalco header a { gap: 8px; font-size: 12px; }
+.portal-cepalco header a small { margin-top: 0; font-size: 7px; letter-spacing: .11em; }
+.portal-cepalco .portal-layout { max-width: 1500px; gap: 14px; padding: 16px 20px; }
+.portal-cepalco .portal-sidebar { border-color: #e2eceb; border-radius: 9px; padding: 9px; }
+.portal-cepalco .portal-sidebar > p { padding: 8px 10px 10px; font-size: 8px; }
+.portal-cepalco .portal-sidebar > button { min-height: 32px; gap: 8px; border-radius: 6px; padding: 7px 9px; font-size: 9px; }
+.portal-cepalco .portal-sidebar > button.active-nav { background: #e5f5f2; color: #075d55; box-shadow: inset 2px 0 #116f65; }
+.portal-cepalco .portal-sidebar > div { margin-top: 22px; background: #e6f6f4; padding: 10px; font-size: 8px; line-height: 1.5; }
+.portal-cepalco .portal-sidebar > div strong { color: #116f65; font-size: 9px; }
+.portal-cepalco .portal-page-heading { margin-bottom: 12px; }
+.portal-cepalco .portal-page-heading > div > p:first-child { margin-bottom: 3px; font-size: 8px; letter-spacing: .12em; }
+.portal-cepalco .portal-page-heading h1 { margin-bottom: 2px; font-size: 21px; line-height: 1.15; }
+.portal-cepalco .portal-page-heading > div > p:last-child { font-size: 9px; }
+.portal-cepalco .portal-page-heading > div:last-child > button { border-radius: 6px; padding: 8px 11px; font-size: 9px; }
+.portal-cepalco .portal-page-heading > div:last-child > span { padding: 7px 9px; font-size: 8px; }
+.portal-cepalco .cepalco-card { border-color: #e3eceb; box-shadow: 0 1px 2px rgba(16,61,57,.035); }
+.portal-cepalco .cepalco-metrics .cepalco-card { min-height: 78px; border-bottom: 2px solid #b2d8d3; }
+.portal-cepalco .cepalco-metric-icon { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 6px; background: #e3f5f2; color: #0b7166; }
+.portal-cepalco .cepalco-pill { display: inline-flex; align-items: center; border-radius: 999px; background: #edf4f4; padding: 3px 6px; color: #53676a; font-size: 7px; font-weight: 700; white-space: nowrap; }
+.portal-cepalco .cepalco-pill.good { background: #e2f4ef; color: #087466; }
+.portal-cepalco .cepalco-overview .cepalco-dashboard-grid { grid-template-columns: minmax(0,1fr) 280px; }
+.portal-cepalco .cepalco-incident-card { border: 1px solid #e6efee; border-radius: 8px; background: #fff; padding: 12px; }
+.portal-cepalco .cepalco-incident-card.compact { padding: 10px; }
+.portal-cepalco .cepalco-status { display: inline-flex; align-items: center; border-radius: 999px; background: #fff4dc; padding: 4px 7px; color: #9a5b00; font-size: 7px; font-weight: 700; }
+.portal-cepalco .cepalco-status.resolved { background: #e5f4f0; color: #126a60; }
+.portal-cepalco .cepalco-status.investigating { background: #fff0db; color: #a25a00; }
+.portal-cepalco .cepalco-status.dispatch { background: #fff1d8; color: #a15b00; }
+.cepalco-scene { position: relative; height: 150px; overflow: hidden; border-radius: 5px; background: linear-gradient(180deg,#c7e1e2 0%,#e8efe8 62%,#839d76 63%,#6b8668 100%); }
+.cepalco-incident-card.compact .cepalco-scene { height: 140px; }
+.cepalco-scene:before,.cepalco-scene:after { position:absolute; bottom:20%; width:32%; height:36%; background:linear-gradient(145deg,#e9e2d0 0 15%,#b9c3b4 15% 58%,#667c71 58%); content:""; clip-path:polygon(0 35%,50% 0,100% 35%,100% 100%,0 100%); }
+.cepalco-scene:before { left:4%; }.cepalco-scene:after { right:5%; width:26%; height:30%; }
+.scene-cloud { position:absolute; top:18px; left:15%; width:58px; height:13px; border-radius:15px; background:rgba(255,255,255,.56); box-shadow:10px -7px 0 2px rgba(255,255,255,.46); }
+.scene-pole { position:absolute; z-index:1; top:7%; left:44%; width:5px; height:74%; background:#494d49; transform:rotate(2deg); box-shadow:2px 0 0 rgba(255,255,255,.25); }
+.scene-pole:before { position:absolute; top:22%; left:-27px; width:58px; height:4px; background:#4e514b; content:""; }
+.scene-wire { position:absolute; z-index:2; top:31%; left:-2%; width:105%; height:2px; border-radius:50%; border-top:2px solid #343c3b; transform:rotate(5deg); }
+.scene-wire.wire-two { top:38%; transform:rotate(-3deg); }
+.scene-bucket { position:absolute; z-index:3; left:49%; top:42%; width:32px; height:18px; border-radius:7px 7px 3px 3px; background:#f1b83d; box-shadow:0 5px 0 #6f7770; }
+.scene-worker { position:absolute; z-index:4; left:53%; top:35%; width:9px; height:27px; border-radius:6px 6px 2px 2px; background:#e8a333; transform:rotate(17deg); }
+.scene-worker:before { position:absolute; top:-7px; left:-2px; width:12px; height:8px; border-radius:50% 50% 3px 3px; background:#f0c293; content:""; }
+.scene-worker:after { position:absolute; top:-9px; left:-3px; width:14px; height:4px; border-radius:5px; background:#f4bd2f; content:""; }
+.scene-worker.worker-two { left:61%; top:39%; transform:rotate(-14deg); background:#df7730; }
+.scene-road { position:absolute; bottom:0; left:0; width:100%; height:19%; background:linear-gradient(180deg,#777d77,#505852); }
+.scene-caption { position:absolute; z-index:5; bottom:6px; left:7px; border-radius:8px; background:#132f31c9; padding:3px 6px; color:#fff; font-size:6px; font-weight:700; letter-spacing:.04em; }
+.portal-cepalco .cepalco-mini-map { position:relative; height:125px; overflow:hidden; border-radius:6px; background-color:#e9f4f2; background-image:linear-gradient(25deg,transparent 47%,#d4e8e4 48% 50%,transparent 51%),linear-gradient(155deg,transparent 57%,#c9e2de 58% 60%,transparent 61%),linear-gradient(90deg,rgba(255,255,255,.75) 1px,transparent 1px),linear-gradient(rgba(255,255,255,.75) 1px,transparent 1px); background-size:auto,auto,45px 45px,45px 45px; }
+.mini-map-title,.large-map-label { position:absolute; top:9px; left:10px; z-index:4; border-radius:3px; background:#fffD; padding:4px 6px; color:#24726a; font-size:6px; font-weight:700; letter-spacing:.07em; }
+.mini-map-pin,.large-map-pin { position:absolute; z-index:3; width:12px; height:12px; border:3px solid white; border-radius:50%; background:#cf3f43; box-shadow:0 1px 4px #263b3b55; }
+.pin-report { left:66%; top:54%; }.pin-work { left:42%; top:31%; background:#efbf36; }.pin-station { left:78%; top:70%; background:#08786e; }.pin-second { left:25%; top:68%; background:#08786e; }
+.portal-cepalco .cepalco-page-stack { display:flex; flex-direction:column; gap:12px; }
+.portal-cepalco .cepalco-toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.portal-cepalco .cepalco-toolbar select,.portal-cepalco .cepalco-field select { height:34px; border:1px solid #dfe9e8; border-radius:6px; background:#fff; padding:0 10px; color:#344a4a; font-size:9px; }
+.portal-cepalco .cepalco-search { display:flex; min-width:220px; flex:1; align-items:center; gap:8px; border:1px solid #e0e9e8; border-radius:7px; background:white; padding:8px 10px; color:#87999a; }
+.portal-cepalco .cepalco-search input { width:100%; border:0; outline:0; background:transparent; font-size:9px; color:#263c3c; }
+.portal-cepalco .cepalco-primary,.portal-cepalco .cepalco-secondary { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:32px; border-radius:6px; padding:7px 11px; font-size:9px; font-weight:700; }
+.portal-cepalco .cepalco-primary { border:1px solid #116f65; background:#116f65; color:white; }.portal-cepalco .cepalco-primary:disabled { opacity:.6; cursor:wait; }
+.portal-cepalco .cepalco-secondary { border:1px solid #dfe9e8; background:#fff; color:#31514f; }
+.portal-cepalco .cepalco-secondary.selected { border-color:#a9cfca; background:#e9f6f3; color:#116f65; }
+.portal-cepalco .cepalco-publish-layout { display:grid; grid-template-columns:minmax(0,1fr) 260px; gap:12px; align-items:start; }
+.portal-cepalco .cepalco-form-card,.portal-cepalco .cepalco-schedule-banner,.portal-cepalco .cepalco-schedule-tools { border:1px solid #e2eceb; border-radius:8px; background:#fff; padding:13px; box-shadow:0 1px 2px #133d3708; }
+.portal-cepalco .cepalco-form-card h2 { margin:0 0 4px; color:#1c3434; font-size:11px; font-weight:800; }
+.portal-cepalco .cepalco-form-card > p { margin:0 0 10px; color:#778789; font-size:8px; line-height:1.5; }
+.portal-cepalco .cepalco-category-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:6px; }
+.portal-cepalco .cepalco-category { display:flex; min-height:75px; flex-direction:column; align-items:flex-start; gap:4px; border:1px solid #e1eae9; border-radius:6px; background:#fff; padding:7px; text-align:left; color:#45615f; }
+.portal-cepalco .cepalco-category.selected { border-color:#178579; background:#effaf8; box-shadow:0 0 0 1px #178579; }
+.portal-cepalco .cepalco-category > span { color:#10766c; font-size:13px; }.portal-cepalco .cepalco-category strong { font-size:8px; }.portal-cepalco .cepalco-category small { color:#7e8d8e; font-size:7px; }
+.portal-cepalco .cepalco-field { display:flex; flex-direction:column; gap:5px; margin-top:10px; color:#3e5554; font-size:8px; font-weight:700; }
+.portal-cepalco .cepalco-field input,.portal-cepalco .cepalco-field textarea { width:100%; border:1px solid #dfe9e8; border-radius:5px; background:#fff; padding:8px; color:#273d3c; font-size:9px; font-weight:400; outline:none; }
+.portal-cepalco .cepalco-field textarea { resize:vertical; }
+.portal-cepalco .cepalco-field input:focus,.portal-cepalco .cepalco-field textarea:focus,.portal-cepalco .cepalco-field select:focus { border-color:#158277; }
+.portal-cepalco .cepalco-form-note { border-radius:5px; background:#eff8f6; padding:8px; color:#537875; font-size:8px; }
+.portal-cepalco .cepalco-channel { display:flex; align-items:center; gap:9px; border:1px solid #dcebe9; border-radius:6px; background:#f4fbf9; padding:9px; }
+.portal-cepalco .cepalco-channel + .cepalco-channel { margin-top:6px; }.portal-cepalco .cepalco-channel.disabled { background:#fafcfc; color:#879696; }
+.portal-cepalco .cepalco-channel > span:nth-child(2) { display:flex; flex:1; flex-direction:column; gap:3px; }.portal-cepalco .cepalco-channel strong { font-size:8px; }.portal-cepalco .cepalco-channel small { font-size:7px; }
+.portal-cepalco .cepalco-upload { display:grid; min-height:56px; place-content:center; border:1px dashed #b9cecb; border-radius:6px; background:#f8fbfa; color:#42736e; text-align:center; font-size:8px; }.portal-cepalco .cepalco-upload small { margin-top:4px; color:#849594; font-size:7px; }
+.portal-cepalco .cepalco-kicker { color:#14796f; font-size:7px; font-weight:800; letter-spacing:.1em; }
+.portal-cepalco .cepalco-checklist { display:grid; gap:7px; margin:8px 0 0; padding-left:16px; color:#526967; font-size:8px; }
+.portal-cepalco .cepalco-map-metric { display:grid; grid-template-columns:1fr auto; align-items:center; gap:2px 8px; min-height:76px; border:1px solid #e1ecea; border-radius:7px; background:white; padding:10px; }
+.portal-cepalco .cepalco-map-metric .cepalco-metric-icon { grid-column:2; grid-row:1 / span 3; width:30px; height:30px; }.portal-cepalco .cepalco-map-metric small { color:#667b7b; font-size:7px; }.portal-cepalco .cepalco-map-metric strong { color:#1e3635; font-size:18px; font-weight:800; }.portal-cepalco .cepalco-map-metric > span:last-child { color:#718483; font-size:7px; }
+.portal-cepalco .cepalco-large-map { position:relative; height:360px; overflow:hidden; border:8px solid #dcecea; border-radius:8px; background-color:#e8f5f3; background-image:linear-gradient(35deg,transparent 46%,#f8ffff 47% 49%,transparent 50%),linear-gradient(145deg,transparent 57%,#d3e9e5 58% 60%,transparent 61%),linear-gradient(90deg,#fff8 1px,transparent 1px),linear-gradient(#fff8 1px,transparent 1px); background-size:auto,auto,70px 70px,70px 70px; }
+.cepalco-large-map svg { position:absolute; inset:0; width:100%; height:100%; fill:none; stroke:#72cfcb; stroke-width:5; opacity:.65; }.cepalco-large-map svg path:nth-child(n+3) { stroke:#fff; stroke-width:2; opacity:.9; }
+.portal-cepalco .large-map-pin { width:18px; height:18px; }.portal-cepalco .large-map-pin.work-pin { left:38%; top:29%; background:#efbc36; }.portal-cepalco .large-map-pin.outage-pin { left:62%; top:55%; width:22px; height:22px; border-width:4px; background:#c94347; box-shadow:0 0 0 5px #dc5b5b44; }.portal-cepalco .large-map-pin.service-pin { left:74%; top:68%; background:#08786e; }
+.portal-cepalco .large-map-popup { position:absolute; z-index:4; top:39%; left:51%; display:grid; gap:5px; max-width:185px; border:1px solid #e1e9e8; border-radius:7px; background:#fff; padding:8px; box-shadow:0 4px 12px #17393826; }.portal-cepalco .large-map-popup strong { font-size:8px; }.portal-cepalco .large-map-popup small { color:#728281; font-size:7px; }
+.portal-cepalco .large-map-controls { position:absolute; top:10px; right:10px; z-index:4; display:flex; gap:4px; }.portal-cepalco .large-map-controls button { width:25px; height:25px; border:1px solid #dce7e6; border-radius:5px; background:white; color:#3e6663; }
+.portal-cepalco .cepalco-large-map svg { transition:transform .18s ease; }.portal-cepalco .cepalco-large-map.layers-hidden { background-image:linear-gradient(90deg,#fff8 1px,transparent 1px),linear-gradient(#fff8 1px,transparent 1px); background-size:70px 70px; }.portal-cepalco .cepalco-large-map.layers-hidden svg { opacity:.18; }
+.portal-cepalco .map-coordinates { position:absolute; right:10px; bottom:8px; border-radius:4px; background:#fff; padding:4px 6px; color:#69807e; font-size:7px; }
+.portal-cepalco .cepalco-schedule-layout { display:grid; grid-template-columns:minmax(0,1fr) 260px; gap:12px; align-items:start; }
+.portal-cepalco .cepalco-schedule-banner h2 { margin:4px 0; color:#1d3635; font-size:16px; font-weight:800; }.portal-cepalco .cepalco-schedule-banner p { max-width:560px; margin:0; color:#6f8281; font-size:8px; line-height:1.6; }
+.portal-cepalco .cepalco-schedule-tools { display:grid; gap:8px; }
+.portal-cepalco .cepalco-chip { border:1px solid #e0eae9; border-radius:999px; background:white; padding:5px 8px; color:#667977; font-size:7px; font-weight:700; }.portal-cepalco .cepalco-chip.active { border-color:#15786d; background:#e5f5f2; color:#116f65; }
+.portal-cepalco .cepalco-work-card { border:1px solid #e1eceb; border-radius:8px; background:white; padding:12px; }.portal-cepalco .cepalco-work-card h3 { margin:8px 0 2px; font-size:11px; font-weight:800; color:#1d3434; }.portal-cepalco .cepalco-work-card > p { margin:0 0 10px; color:#617675; font-size:8px; }
+.portal-cepalco .cepalco-work-packet { display:grid; gap:5px; margin-top:10px; border-radius:5px; background:#f3f8f7; padding:9px; color:#5f7371; font-size:8px; }.portal-cepalco .cepalco-work-packet strong { color:#24413e; }
+.portal-cepalco .cepalco-week-calendar { border:1px solid #e1eceb; border-radius:8px; background:white; padding:12px; }.portal-cepalco .cepalco-week-calendar h3 { margin:0 0 10px; font-size:11px; font-weight:800; }.portal-cepalco .cepalco-week-grid { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:5px; }.portal-cepalco .cepalco-week-grid article { display:grid; min-height:100px; align-content:start; gap:6px; border:1px solid #edf2f1; border-radius:5px; padding:6px; }.portal-cepalco .cepalco-week-grid article > strong { color:#78908d; font-size:7px; text-transform:uppercase; }.portal-cepalco .cepalco-week-grid article > span { font-size:12px; font-weight:800; }.portal-cepalco .cepalco-week-grid small { border-radius:4px; background:#e7f5f2; padding:4px; color:#146c63; font-size:7px; }.portal-cepalco .cepalco-week-calendar > p { color:#768684; font-size:8px; }
+.portal-cepalco .cepalco-schedule-detail { display:grid; gap:4px; border-radius:5px; background:#f4f9f8; padding:7px; }.portal-cepalco .cepalco-schedule-detail small { color:#788a89; font-size:7px; }.portal-cepalco .cepalco-schedule-detail strong { color:#405654; font-size:7px; }
+.portal-cepalco .cepalco-timeline-item { display:grid; grid-template-columns:30px 1fr auto; gap:7px; align-items:center; border-bottom:1px solid #edf2f1; padding:9px 0; }.portal-cepalco .cepalco-timeline-item:last-child { border-bottom:0; }.portal-cepalco .timeline-date { display:grid; width:26px; height:26px; place-items:center; border-radius:6px; background:#e4f4f1; color:#13786e; font-size:9px; font-weight:800; }.portal-cepalco .cepalco-timeline-item > span:nth-child(2) { display:grid; gap:3px; }.portal-cepalco .cepalco-timeline-item strong { font-size:7px; }.portal-cepalco .cepalco-timeline-item small { color:#728482; font-size:7px; }.portal-cepalco .cepalco-timeline-item b { color:#187a6d; font-size:6px; white-space:nowrap; }
+.portal-cepalco .cepalco-incident-card > p { white-space:pre-line; }
+@media (max-width: 1023px) {
+  .portal-cepalco .cepalco-overview .cepalco-dashboard-grid { grid-template-columns:minmax(0,1fr); }
+}
+@media (max-width: 767px) {
+  .portal-cepalco .cepalco-publish-layout,.portal-cepalco .cepalco-schedule-layout { grid-template-columns:minmax(0,1fr); }
+  .portal-cepalco .cepalco-category-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .portal-cepalco .cepalco-large-map { height:280px; }
+  .portal-cepalco .cepalco-schedule-banner > div { flex-direction:column; }
+  .portal-cepalco .cepalco-week-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+
+.portal-water { --brand:#087c91; --brand-dark:#075e70; --brand-soft:#e7f7fa; --accent:#087c91; background:#f3f7f8; color:#172b3e; }
+.portal-water .portal-header { height:44px; border-color:#e3eaed; padding-inline:18px; }
+.portal-water .brand-symbol { width:24px; height:24px; border-radius:7px; background:#087c91; box-shadow:none; }
+.portal-water header a { gap:8px; font-size:10px; }
+.portal-water header a small { margin-top:0; font-size:6px; letter-spacing:.1em; }
+.portal-water .avatar { width:24px; height:24px; background:#e0f4f7; color:#087c91; font-size:8px; }
+.portal-water .portal-layout { max-width:1500px; grid-template-columns:170px minmax(0,1fr); gap:16px; padding:16px 18px; }
+.portal-water .portal-sidebar { display:block; position:sticky; top:58px; border-color:#e4ebed; border-radius:9px; padding:8px; }
+.portal-water .portal-sidebar > p { padding:8px 8px 10px; font-size:7px; letter-spacing:.1em; }
+.portal-water .portal-sidebar > button { min-height:29px; gap:7px; border-radius:7px; padding:6px 8px; font-size:8px; }
+.portal-water .portal-sidebar > button.active-nav { background:#e3f5f7; color:#087c91; box-shadow:inset 2px 0 #087c91; }
+.portal-water .portal-sidebar > div { margin-top:20px; background:#f2f6f7; padding:9px; font-size:7px; line-height:1.5; }
+.portal-water .portal-sidebar > div strong { font-size:8px; }
+.portal-water .portal-page-heading { margin-bottom:12px; }
+.portal-water .portal-page-heading > div > p:first-child { margin-bottom:3px; font-size:7px; letter-spacing:.12em; }
+.portal-water .portal-page-heading h1 { margin-bottom:2px; font-size:18px; line-height:1.2; }
+.portal-water .portal-page-heading > div > p:last-child { font-size:8px; }
+.portal-water .portal-page-heading > div:last-child > button { border-radius:7px; padding:7px 10px; font-size:8px; }
+.portal-water .portal-page-heading > div:last-child > span { padding:6px 8px; font-size:7px; }
+.portal-water .water-overview { display:flex; flex-direction:column; gap:12px; }
+.portal-water .water-overview > section:first-child { grid-template-columns:repeat(4,minmax(0,1fr)); gap:9px; }
+.portal-water .water-overview > section:first-child article { min-height:84px; border-color:#e4ebed; border-radius:9px; padding:11px; box-shadow:none; }
+.portal-water .water-overview > section:first-child article > div { width:24px; height:24px; margin-bottom:6px; border-radius:6px; }
+.portal-water .water-overview > section:first-child article strong { font-size:18px; }
+.portal-water .water-overview > section:first-child article > span { font-size:7px; }
+.portal-water .water-overview > section:nth-child(2) { grid-template-columns:minmax(0,1fr) 170px; gap:12px; }
+.portal-water .water-overview > section:nth-child(2) > div:first-child { display:flex; flex-direction:column; gap:12px; }
+.portal-water .water-overview article { border-color:#e4ebed; border-radius:9px; box-shadow:none; }
+.portal-water .water-overview article h2 { font-size:10px; }
+.portal-water .water-overview article p { font-size:7px; }
+.portal-water .water-overview article button { font-size:8px; }
+.portal-water .water-overview > section:nth-child(2) article { padding:13px; }
+.portal-water .water-overview .water-mini-map { height:84px; border-radius:7px; background:#edf3ed; }
+.portal-water .water-overview .water-mini-map .map-pin { width:11px; height:11px; }
+.portal-water .water-overview .water-mini-map > span:first-child { font-size:6px; }
+.portal-water .water-overview > section:nth-child(2) > div:last-child { display:flex; flex-direction:column; gap:12px; }
+.portal-water .water-overview > section:nth-child(2) > div:last-child article { padding:12px; }
+.portal-water .water-overview > section:nth-child(2) > div:last-child article:first-child { padding:12px; }
+.portal-water .water-overview > section:nth-child(2) > div:last-child article:first-child > div:nth-child(2) { gap:9px; font-size:8px; }
+.portal-water .water-overview > section:nth-child(2) > div:last-child article:first-child > div:nth-child(2) > div { font-size:7px; }
+.portal-water .water-overview > section:nth-child(2) > div:last-child > article:nth-child(2) > div:last-child { margin-top:8px; }
+.portal-water .water-overview > section:nth-child(2) > div:last-child > article:nth-child(3) { padding:10px; }
+.portal-water .water-overview > section:nth-child(2) > div:last-child > article:nth-child(3) button { width:100%; border:1px solid #e8eef0; border-radius:6px; padding:7px; text-align:left; }
+.portal-water .water-overview > section:nth-child(2) > div:last-child > article:nth-child(3) button + button { margin-top:4px; }
+.portal-water .portal-page-heading:has(+ .water-overview) > div > p:last-child { max-width:560px; }
+.portal-water .water-page { display:grid; gap:12px; }
+.portal-water .water-search { display:flex; min-height:34px; align-items:center; gap:8px; border:1px solid #e1e9ec; border-radius:7px; background:white; padding:0 10px; color:#8b9cac; }
+.portal-water .water-search input { width:100%; border:0; outline:0; background:transparent; color:#24384d; font-size:8px; }
+.portal-water .water-featured { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; border:1px solid #e3ebed; border-radius:8px; background:#fff; padding:10px; }
+.portal-water .water-featured > div { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.portal-water .water-featured > div > span { border-radius:99px; background:#e6f6f8; padding:4px 7px; color:#087c91; font-size:7px; font-weight:800; }
+.portal-water .water-featured p { margin:0; color:#63778a; font-size:7px; }
+.portal-water .water-featured button,.portal-water .water-advisory-card > button,.portal-water .water-report-card button { border:0; background:transparent; color:#087c91; font-size:7px; font-weight:800; }
+.portal-water .water-featured .water-featured-details { flex-basis:100%; padding:7px 0 0; }
+.portal-water .water-advisory-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+.portal-water .water-advisory-card,.portal-water .water-report-card { min-width:0; border:1px solid #e3ebed; border-radius:9px; background:white; padding:11px; }
+.portal-water .water-advisory-card.investigating { border-left:2px solid #f3a000; }
+.portal-water .water-advisory-card.resolved { border-left:2px solid #39b88d; }
+.portal-water .water-card-meta { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:6px; }
+.portal-water .water-card-meta time { color:#9aaabb; font-size:6px; }
+.portal-water .water-status { display:inline-flex; border-radius:999px; background:#fff4df; padding:4px 7px; color:#a56504; font-size:7px; font-weight:800; }
+.portal-water .water-status.resolved { background:#e6f7f0; color:#16815f; }
+.portal-water .water-status.received { background:#e8f6fb; color:#087c91; }
+.portal-water .water-status.dispatched { background:#eaf0ff; color:#315fc2; }
+.portal-water .water-status.scheduled { background:#edf3ff; color:#315fc2; }
+.portal-water .water-estimate { border:1px solid #e5ebf1; border-radius:99px; padding:3px 6px; color:#718096; font-size:6px; }
+.portal-water .water-advisory-card h2,.portal-water .water-report-card h2,.portal-water .water-work-list h2 { margin:8px 0 3px; color:#192a3d; font-size:9px; font-weight:800; }
+.portal-water .water-card-ref { margin:0; color:#798a9d; font-size:7px; }
+.portal-water .water-card-copy { margin:10px 0 7px; border-top:1px solid #f0f3f5; padding-top:8px; color:#6d8092; font-size:7px; line-height:1.5; }
+.portal-water .water-card-detail { margin:8px 0 0; border-radius:5px; background:#f5f8f9; padding:8px; color:#64778a; font-size:7px; line-height:1.5; }
+.portal-water .water-empty { grid-column:1/-1; border:1px solid #e3ebed; border-radius:9px; background:white; padding:30px 16px; color:#718096; text-align:center; font-size:9px; }
+.portal-water .water-mobile-publish { display:none; }
+.portal-water .water-reports { gap:9px; }
+.portal-water .water-report-card { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; padding:13px; }
+.portal-water .water-report-content { min-width:0; flex:1; }
+.portal-water .water-report-card .water-card-copy { border-top:0; padding-top:0; margin-top:8px; }
+.portal-water .water-report-photo { position:relative; flex:none; width:112px; height:56px; margin-top:25px; overflow:hidden; border-radius:6px; background:linear-gradient(160deg,#b7d3c2 0 30%,#77877a 31% 40%,#d5d0bc 41% 66%,#645f55 67%); box-shadow:0 1px 4px #25384b40; }
+.portal-water .water-report-photo:before { position:absolute; right:20px; bottom:0; width:28px; height:38px; background:linear-gradient(90deg,#e18a2e 0 28%,#333 29% 48%,#d78a28 49% 100%); content:""; transform:skew(-10deg); }
+.portal-water .water-report-photo span { position:absolute; right:3px; bottom:3px; border-radius:3px; background:#172b3ecc; padding:2px 4px; color:white; font-size:5px; }
+.portal-water .water-schedule-toolbar,.portal-water .water-publish-top { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; border:1px solid #e3ebed; border-radius:9px; background:white; padding:12px; }
+.portal-water .water-schedule-toolbar strong,.portal-water .water-publish-top h2 { color:#192a3d; font-size:12px; font-weight:800; }
+.portal-water .water-schedule-toolbar p { margin:4px 0 0; color:#718096; font-size:7px; }
+.portal-water .water-schedule-toolbar > div:last-child,.portal-water .water-publish-top > div:last-child,.portal-water .water-publish-footer { display:flex; flex-wrap:wrap; gap:5px; }
+.portal-water .water-schedule-toolbar button,.portal-water .water-publish-top button,.portal-water .water-publish-footer button { border:1px solid #e0e8eb; border-radius:6px; background:white; padding:7px 9px; color:#476072; font-size:7px; font-weight:700; }
+.portal-water .water-schedule-toolbar button.selected { border-color:#a7dce3; background:#e7f7fa; color:#087c91; }
+.portal-water .water-schedule-toolbar button.water-primary,.portal-water button.water-primary { border-color:#087c91; background:#087c91; color:white; }
+.portal-water button.water-primary:disabled { opacity:.6; cursor:wait; }
+.portal-water .water-work-list { display:grid; gap:8px; }
+.portal-water .water-work-list article { border:1px solid #e3ebed; border-radius:8px; background:white; padding:12px; }
+.portal-water .water-work-list article > div { display:flex; flex-wrap:wrap; gap:12px; color:#718096; font-size:7px; }
+.portal-water .water-week-grid { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:5px; }
+.portal-water .water-week-grid article { display:grid; min-height:90px; align-content:start; gap:6px; border:1px solid #e3ebed; border-radius:7px; background:white; padding:7px; }
+.portal-water .water-week-grid article strong { color:#7d90a1; font-size:7px; text-transform:uppercase; }
+.portal-water .water-week-grid article > span { color:#1b2c3f; font-size:12px; font-weight:800; }
+.portal-water .water-week-grid small { border-radius:4px; background:#e6f6f8; padding:4px; color:#087c91; font-size:6px; }
+.portal-water .water-publish-form { gap:9px; }
+.portal-water .water-publish-top { padding:10px 12px; }
+.portal-water .water-publish-top > div:first-child > span { color:#087c91; font-size:6px; font-weight:800; letter-spacing:.08em; }
+.portal-water .water-publish-top h2 { margin:3px 0 0; font-size:13px; }
+.portal-water .water-form-card { display:grid; gap:8px; border:1px solid #e3ebed; border-radius:8px; background:white; padding:11px; }
+.portal-water .water-form-card h3 { margin:0; color:#203349; font-size:9px; font-weight:800; }
+.portal-water .water-form-card > p { margin:0; color:#798b9d; font-size:7px; }
+.portal-water .water-form-card label { display:grid; gap:4px; color:#354b5f; font-size:7px; font-weight:700; }
+.portal-water .water-form-card input:not([type=checkbox]),.portal-water .water-form-card select,.portal-water .water-form-card textarea { width:100%; border:1px solid #dfe8ec; border-radius:5px; background:white; padding:7px 8px; color:#26394d; font-size:8px; font-weight:400; }
+.portal-water .water-category-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:5px; }
+.portal-water .water-category-grid button { display:grid; gap:4px; min-height:48px; border:1px solid #e4eaee; border-radius:6px; background:white; padding:6px; text-align:left; }
+.portal-water .water-category-grid button.selected { border-color:#60b9c8; background:#effafd; box-shadow:0 0 0 1px #60b9c8; }
+.portal-water .water-category-grid strong { color:#31475b; font-size:7px; }
+.portal-water .water-category-grid small { color:#7d8c9c; font-size:6px; line-height:1.35; }
+.portal-water .water-timeline-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.portal-water .water-channel-row { display:flex; align-items:center; justify-content:space-between; gap:8px; border:1px solid #eaf0f2; border-radius:6px; padding:7px; }
+.portal-water .water-channel-row span { display:grid; gap:3px; }
+.portal-water .water-channel-row strong { color:#354b5f; font-size:7px; }
+.portal-water .water-channel-row small { color:#8795a3; font-size:6px; }
+.portal-water .water-publish-footer { justify-content:flex-end; border:1px solid #e3ebed; border-radius:8px; background:white; padding:9px; }
+.portal-water .water-publish-footer button.water-primary { border-color:#087c91; }
+.portal-water .water-draft-saved { margin:0; color:#087c91; font-size:7px; }
+.portal-water .water-publish-footer .water-draft-saved { margin-right:auto; align-self:center; }
+.portal-water .water-map { height:160px; border-radius:8px; background:#edf3ed; }
+.portal-water .water-map > span:first-child { font-size:7px; }
+.portal-water .water-map .map-pin { width:12px; height:12px; }
+.portal-water .water-map .map-pin.planned { left:42%; top:30%; }
+.portal-water .water-map .map-pin:not(.planned):not(.report) { left:57%; top:49%; }
+.portal-water .water-map .map-pin.report { left:63%; top:66%; }
+.portal-water .water-map .map-pin.report:last-child { left:37%; top:66%; }
+.water-login { grid-template-columns:repeat(2,minmax(0,1fr)); background:#fff; }
+.water-login .login-art { min-height:100vh; background:#087c91; padding:46px; }
+.water-login .login-art > div:nth-of-type(2) > h1 { max-width:360px; font-size:clamp(2rem,4.6vw,3rem); line-height:1; }
+.water-login .login-art .brand-symbol { border:1px solid #ffffff35; background:#ffffff16; box-shadow:none; }
+.water-login > section:last-child { padding-inline:clamp(24px,7vw,80px); }
+@media (max-width: 639px) {
+  .water-login { grid-template-columns:minmax(0,1fr); }
+  .water-login .login-art { min-height:360px; padding:28px; }
+}
+@media (max-width: 900px) {
+  .portal-water .water-overview > section:nth-child(2) { grid-template-columns:minmax(0,1fr) 155px; }
+  .portal-water .water-overview > section:first-child article { padding:9px; }
+}
+@media (max-width: 700px) {
+  .portal-water .portal-layout { grid-template-columns:minmax(0,1fr); padding:12px; }
+  .portal-water .portal-sidebar:not(.fixed) { display:none; }
+  .portal-water .portal-sidebar.fixed { position:fixed; display:block; }
+  .portal-water .water-overview > section:first-child { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .portal-water .water-overview > section:nth-child(2) { grid-template-columns:minmax(0,1fr); }
+  .portal-water .water-overview > section:nth-child(2) > div:first-child > article:last-child { display:block; }
+  .portal-water .water-overview > section:nth-child(2) > div:last-child { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .portal-water .water-advisory-grid { grid-template-columns:minmax(0,1fr); }
+  .portal-water .water-mobile-publish { display:flex; align-items:center; justify-content:center; gap:6px; border:0; border-radius:7px; background:#087c91; padding:10px; color:white; font-size:9px; font-weight:700; }
+  .portal-water .water-week-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .portal-water .water-category-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+@media (max-width: 420px) {
+  .portal-water .water-report-photo { width:76px; }
+  .portal-water .water-overview > section:nth-child(2) > div:last-child { grid-template-columns:minmax(0,1fr); }
+}

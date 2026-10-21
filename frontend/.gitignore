@@ -1,9 +1,0 @@
-.env
-.env.*
-node_modules/
-dist/
-*.local
-.git
-.DS_Store
-Thumbs.db
-coverage/
