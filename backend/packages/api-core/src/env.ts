@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 function loadEnvFile(filePath: string): void {
   if (!existsSync(filePath)) return;
@@ -22,6 +23,10 @@ function loadEnvFile(filePath: string): void {
   }
 }
 
-// Load a local .env file for development convenience (does not override existing env vars).
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+
+// Workspace settings override shared defaults; shell-provided variables override both.
 loadEnvFile(join(process.cwd(), ".env"));
 loadEnvFile(join(process.cwd(), ".env.local"));
+loadEnvFile(join(projectRoot, ".env"));
+loadEnvFile(join(projectRoot, ".env.local"));

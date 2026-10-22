@@ -42,15 +42,16 @@ test("Gmail refresh tokens are authenticated-encrypted at rest", () => {
   assert.throws(() => decryptRefreshToken(encrypted), /cannot be decrypted/);
 });
 
-test("Gmail message includes the full subject and body as a UTF-8 MIME message", () => {
-  const raw = createRawEmail("resident@example.test", "Power advisory — Carmen", "Power advisory — Carmen\n\nFull notice and safety details.");
+test("Gmail message includes the full subject, notice, and social post links", () => {
+  const body = "Power advisory — Carmen\n\nFull notice and safety details.\n\nSocial post links:\nFacebook: https://www.facebook.com/example/posts/123";
+  const raw = createRawEmail("resident@example.test", "Power advisory — Carmen", body);
   const message = Buffer.from(raw, "base64url").toString("utf8");
   const bodyBase64 = message.split("\r\n\r\n").at(-1);
   assert.match(message, /To: resident@example\.test/);
   assert.match(message, /Subject: =\?UTF-8\?B\?/);
   assert.equal(
     Buffer.from(bodyBase64 ?? "", "base64").toString("utf8"),
-    "Power advisory — Carmen\n\nFull notice and safety details.",
+    body,
   );
   assert.throws(() => createRawEmail("bad\r\nBcc: attacker@example.test", "Subject", "Body"), /Recipient email address is invalid/);
 });

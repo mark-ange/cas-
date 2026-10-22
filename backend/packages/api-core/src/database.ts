@@ -36,6 +36,9 @@ database.exec(`
     area TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'Monitoring',
     details TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'Normal',
+    service_starts_at TEXT,
+    estimated_restoration_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS work_orders (
@@ -90,6 +93,14 @@ database.exec(`
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     utility TEXT NOT NULL CHECK (utility IN ('CEPALCO', 'Water District')),
     expires_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS social_posts (
+    advisory_id INTEGER NOT NULL REFERENCES advisories(id) ON DELETE CASCADE,
+    platform TEXT NOT NULL CHECK (platform IN ('facebook', 'instagram')),
+    post_id TEXT NOT NULL,
+    permalink_url TEXT,
+    published_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (advisory_id, platform)
   );
   CREATE TABLE IF NOT EXISTS email_deliveries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,6 +191,9 @@ for (const [name, definition] of [
   ["scheduled_at", "TEXT"],
   ["publication_status", "TEXT NOT NULL DEFAULT 'published'"],
   ["channels_json", "TEXT NOT NULL DEFAULT '[]'"],
+  ["priority", "TEXT NOT NULL DEFAULT 'Normal'"],
+  ["service_starts_at", "TEXT"],
+  ["estimated_restoration_at", "TEXT"],
 ] as const) {
   if (!advisoryColumns.has(name)) {
     database.exec(`ALTER TABLE advisories ADD COLUMN ${name} ${definition}`);

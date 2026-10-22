@@ -104,19 +104,85 @@ test("resident consent controls advisory email delivery and admins remain utilit
   const gmailStatus = await jsonRequest(`${cepalcoApi}/email/gmail/status`, "GET", undefined, cepalcoToken);
   assert.equal(gmailStatus.response.status, 200);
   assert.equal(gmailStatus.result.connected, false);
+  const socialStatus = await jsonRequest(`${cepalcoApi}/social/status`, "GET", undefined, cepalcoToken);
+  assert.equal(socialStatus.response.status, 200);
+  assert.equal(typeof socialStatus.result.facebook, "boolean");
+  assert.equal(typeof socialStatus.result.instagram, "boolean");
+
+  const previousFetch = globalThis.fetch;
+  const previousMetaEnvironment = {
+    pageId: process.env.META_FACEBOOK_PAGE_ID,
+    accessToken: process.env.META_FACEBOOK_PAGE_ACCESS_TOKEN,
+  };
+  process.env.META_FACEBOOK_PAGE_ID = "test-page";
+  process.env.META_FACEBOOK_PAGE_ACCESS_TOKEN = "test-page-token";
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    if (url.hostname === "graph.facebook.com" && init?.method === "POST" && url.pathname.endsWith("/feed")) {
+      return new Response(JSON.stringify({ id: "test-page_456" }), { status: 200 });
+    }
+    if (url.hostname === "graph.facebook.com" && url.searchParams.get("fields") === "permalink_url") {
+      return new Response(JSON.stringify({ permalink_url: "https://www.facebook.com/test-page/posts/456" }), { status: 200 });
+    }
+    return previousFetch(input, init);
+  };
+  try {
+    const facebookAdvisory = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+      title: "Facebook link test",
+      area: "Carmen",
+      details: "Verify stored social post links.",
+      channels: ["facebook"],
+    }, cepalcoToken);
+    assert.equal(facebookAdvisory.response.status, 201);
+    assert.equal(facebookAdvisory.result.facebookUrl, "https://www.facebook.com/test-page/posts/456");
+    const residentFacebookAdvisories = await jsonRequest(`${residentApi}/advisories`);
+    assert.ok((residentFacebookAdvisories.result as unknown as Array<Record<string, unknown>>)
+      .some(item => item.id === facebookAdvisory.result.id && item.facebookUrl === "https://www.facebook.com/test-page/posts/456"));
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousMetaEnvironment.pageId === undefined) delete process.env.META_FACEBOOK_PAGE_ID;
+    else process.env.META_FACEBOOK_PAGE_ID = previousMetaEnvironment.pageId;
+    if (previousMetaEnvironment.accessToken === undefined) delete process.env.META_FACEBOOK_PAGE_ACCESS_TOKEN;
+    else process.env.META_FACEBOOK_PAGE_ACCESS_TOKEN = previousMetaEnvironment.accessToken;
+  }
 
   const scheduled = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
     title: "Scheduled service update",
     area: "Carmen",
     type: "Maintenance",
     details: "This update is scheduled for testing.",
+    priority: "Urgent",
+    serviceStartsAt: "2026-10-23T08:00:00.000Z",
+    estimatedRestorationAt: "2026-10-23T12:00:00.000Z",
     channels: ["sms"],
     imageDataUrl: "data:image/png;base64,iVBORw0KGgo=",
     scheduledAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
   }, cepalcoToken);
   assert.equal(scheduled.response.status, 201);
   assert.equal(scheduled.result.publicationStatus, "scheduled");
+  assert.equal(scheduled.result.priority, "Urgent");
+  assert.equal(scheduled.result.serviceStartsAt, "2026-10-23T08:00:00.000Z");
+  assert.equal(scheduled.result.estimatedRestorationAt, "2026-10-23T12:00:00.000Z");
   assert.equal(scheduled.result.emailDelivery, undefined);
+  const invalidWindow = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    title: "Invalid service window",
+    area: "Carmen",
+    details: "This advisory has an invalid timeline.",
+    serviceStartsAt: "2026-10-23T12:00:00.000Z",
+    estimatedRestorationAt: "2026-10-23T08:00:00.000Z",
+    channels: ["sms"],
+  }, cepalcoToken);
+  assert.equal(invalidWindow.response.status, 400);
+  assert.match(String(invalidWindow.result.error), /must be after/);
+  const invalidPriority = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    title: "Invalid priority",
+    area: "Carmen",
+    details: "This advisory uses an unsupported priority.",
+    priority: "Immediate",
+    channels: ["sms"],
+  }, cepalcoToken);
+  assert.equal(invalidPriority.response.status, 400);
+  assert.match(String(invalidPriority.result.error), /valid advisory priority/);
   const scheduledPublic = await jsonRequest(`${residentApi}/advisories`);
   const scheduledId = Number(scheduled.result.id);
   const scheduledReference = String(scheduled.result.reference);
@@ -145,7 +211,10 @@ test("resident consent controls advisory email delivery and admins remain utilit
   ), JSON.stringify(residentInbox.result));
   const scheduledAdminList = await jsonRequest(`${cepalcoApi}/advisories`, "GET", undefined, cepalcoToken);
   assert.ok((scheduledAdminList.result as unknown as Array<Record<string, unknown>>).some(
-    item => item.id === scheduledId && item.publicationStatus === "published",
+    item => item.id === scheduledId && item.publicationStatus === "published" &&
+      item.priority === "Urgent" &&
+      item.serviceStartsAt === "2026-10-23T08:00:00.000Z" &&
+      item.estimatedRestorationAt === "2026-10-23T12:00:00.000Z",
   ));
   const publishedImage = await fetch(`${residentApi}/advisories/${scheduledId}/image`);
   assert.equal(publishedImage.status, 200);
@@ -156,6 +225,10 @@ test("resident consent controls advisory email delivery and admins remain utilit
     (residentAdvisories.result as unknown as Array<Record<string, unknown>>).find(item => item.id === scheduledId)?.imageUrl,
     `/advisories/${scheduledId}/image`,
   );
+  const residentScheduled = (residentAdvisories.result as unknown as Array<Record<string, unknown>>).find(item => item.id === scheduledId);
+  assert.equal(residentScheduled?.priority, "Urgent");
+  assert.equal(residentScheduled?.serviceStartsAt, "2026-10-23T08:00:00.000Z");
+  assert.equal(residentScheduled?.estimatedRestorationAt, "2026-10-23T12:00:00.000Z");
 
   const connect = await jsonRequest(`${cepalcoApi}/email/gmail/connect`, "POST", {}, cepalcoToken);
   assert.equal(connect.response.status, 503);

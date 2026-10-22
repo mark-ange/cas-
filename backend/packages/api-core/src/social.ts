@@ -5,6 +5,7 @@ export type SocialPlatformResult = {
   status: "published" | "failed" | "not_configured";
   message?: string;
   id?: string;
+  permalinkUrl?: string;
 };
 
 export type SocialDeliverySummary = {
@@ -27,6 +28,20 @@ function graphBase(): string {
 
 function advisoryMessage(title: string, area: string, details: string, reference: string): string {
   return `${title}\n\nAffected area: ${area}\n\n${details}\n\nReference: ${reference}`;
+}
+
+async function fetchPermalink(id: string, fields: "permalink_url" | "permalink", accessToken: string): Promise<string | null> {
+  try {
+    const response = await fetch(`${graphBase()}/${encodeURIComponent(id)}?fields=${fields}&access_token=${encodeURIComponent(accessToken)}`);
+    const result = await response.json() as { permalink_url?: string; permalink?: string };
+    if (!response.ok) return null;
+    const permalink = fields === "permalink_url" ? result.permalink_url : result.permalink;
+    return typeof permalink === "string" && /^https:\/\/(?:www\.)?(?:facebook\.com|instagram\.com)\//.test(permalink)
+      ? permalink
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 async function publishToFacebook(
@@ -60,7 +75,9 @@ if (!attachment) {
       if (!response.ok || (!result.id && !result.post_id)) {
         return { platform: "facebook", status: "failed", message: result.error?.message || "Facebook could not publish the image." };
       }
-      return { platform: "facebook", status: "published", id: result.post_id ?? result.id };
+      const id = result.post_id ?? result.id!;
+      const permalinkUrl = await fetchPermalink(id, "permalink_url", accessToken);
+      return { platform: "facebook", status: "published", id, permalinkUrl: permalinkUrl ?? `https://www.facebook.com/${encodeURIComponent(id)}`, ...(permalinkUrl ? {} : { message: "Facebook published the post, but its public link could not be confirmed." }) };
     }
 
     const response = await fetch(`${graphBase()}/${encodeURIComponent(pageId)}/feed?access_token=${encodeURIComponent(accessToken)}`, {
@@ -72,7 +89,8 @@ if (!attachment) {
     if (!response.ok || !result.id) {
       return { platform: "facebook", status: "failed", message: result.error?.message || "Facebook could not publish the announcement." };
     }
-    return { platform: "facebook", status: "published", id: result.id };
+    const permalinkUrl = await fetchPermalink(result.id, "permalink_url", accessToken);
+    return { platform: "facebook", status: "published", id: result.id, permalinkUrl: permalinkUrl ?? `https://www.facebook.com/${encodeURIComponent(result.id)}`, ...(permalinkUrl ? {} : { message: "Facebook published the post, but its public link could not be confirmed." }) };
   } catch (error) {
     return { platform: "facebook", status: "failed", message: error instanceof Error ? error.message : "Facebook publishing failed." };
   }
@@ -121,7 +139,8 @@ async function publishToInstagram(
     if (!publishResponse.ok || !published.id) {
       return { platform: "instagram", status: "failed", message: published.error?.message || "Instagram could not publish the announcement." };
     }
-    return { platform: "instagram", status: "published", id: published.id };
+    const permalinkUrl = await fetchPermalink(published.id, "permalink", accessToken);
+    return { platform: "instagram", status: "published", id: published.id, ...(permalinkUrl ? { permalinkUrl } : { message: "Instagram published the post, but Meta did not return its permalink. Check the connected account permissions." }) };
   } catch (error) {
     return { platform: "instagram", status: "failed", message: error instanceof Error ? error.message : "Instagram publishing failed." };
   }

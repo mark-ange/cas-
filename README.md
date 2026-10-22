@@ -1,6 +1,6 @@
 # CivicAlert
 
-CivicAlert currently has Resident, CEPALCO, and Water District portals backed by a shared Express API and SQLite database. The frontend uses:
+CivicAlert has Resident, CEPALCO, and Water District portals. Authentication and application records (profiles, advisories, reports, work orders, network readings, and the resident inbox) use Supabase. The Express APIs remain responsible for Gmail/Meta delivery and keep their provider credentials server-side; their SQLite database is still used for Gmail OAuth state and notification-delivery bookkeeping. See the [Supabase setup guide](./supabase/SETUP.md) before starting the portals.
 
 | Layer | Technology |
 |---|---|
@@ -8,27 +8,18 @@ CivicAlert currently has Resident, CEPALCO, and Water District portals backed by
 | Programming language | TypeScript |
 | Build tool | Vite |
 | Styling | Tailwind CSS |
-| API (current runtime) | Express + TypeScript |
-| Database (current runtime) | SQLite |
+| API | Express + TypeScript (private notification integrations) |
+| Database | Supabase PostgreSQL (application records); SQLite (local notification-integration state) |
 | Notification demonstration | Simulated SMS records and a virtual inbox |
 
-A Supabase/PostgreSQL migration has been prepared under `supabase/`. It defines the intended hosted database, Row Level Security, authentication profile trigger, and Realtime publication; it does not become the application's active database until the backend and frontend are configured to use a Supabase project. See [Supabase database setup](./supabase/SETUP.md) for setup steps and account migration limitations.
+A Supabase/PostgreSQL schema and incremental migrations are under `supabase/`. They define Row Level Security, authentication profile creation, Realtime publication, resident self-service policy, and a resumable SQLite importer (`npm run db:import:sqlite`). See [Supabase database setup](./supabase/SETUP.md) for configuration and account-transfer details.
 
-The planned stack, matching the provided technology outline, is:
-
-| Layer | Technology | Purpose |
-|---|---|---|
-| Frontend | React 18, TypeScript, Vite, Tailwind CSS | Build and serve the three responsive portals |
-| Database | Supabase PostgreSQL | Store profiles, advisories, reports, work orders, and notifications |
-| Authentication and realtime | Supabase Auth and Realtime | Manage user sessions and deliver live advisory/inbox updates |
-| Private integrations | Express + TypeScript API | Keep Gmail/social credentials and scheduled publishing on the server |
-
-Resident accounts and profiles, utility administrator authentication, advisories, work orders, reports, simulated SMS inbox messages, and Water District network readings use the backend. SMS is simulated; no text messages are sent.
+Resident accounts and utility administrator authentication use Supabase Auth. Supabase RLS protects application tables. SMS remains simulated; no text messages are sent. Realtime is configured in the database but the portals currently refresh through requests.
 
 ## Project structure
 
 - `frontend/apps/` — Resident, CEPALCO, and Water District Vite applications.
-- `frontend/packages/ui/` — shared React interface, Tailwind styles, local demo settings, and `localStorage` prototype data.
+- `frontend/packages/ui/` — shared React interface, Supabase client, and Tailwind styles.
 - `backend/apps/` — Resident, CEPALCO, and Water District API entry points.
 - `backend/packages/api-core/` — shared API routes, authentication, and SQLite storage.
 - `package.json`, `package-lock.json`, and `tsconfig.json` — root workspace and tool configuration.
@@ -69,18 +60,9 @@ npm run dev:cepalco
 npm run dev:water
 ```
 
-## Demo accounts and data
+## Accounts and data
 
-CEPALCO and Water District demo administrator accounts use the password `DemoPass123!`:
-
-| Portal | Username |
-|---|---|
-| CEPALCO | `admin@cepalco.local` |
-| Water District | `admin@waterdistrict.local` |
-
-Residents can register from the Resident portal. Resident accounts, profiles, advisories, work orders, reports, simulated inbox messages, and network readings are stored in the shared backend database.
-
-In development, CEPALCO and Water District demo administrators use the password `DemoPass123!` from the accounts above. Demo accounts are seeded when the API starts outside production. In production, configure administrator accounts separately; development seed accounts are not created.
+Create utility administrator accounts in Supabase Authentication and set their profiles to `role = 'admin'` with the exact utility (`CEPALCO` or `Water District`) using the Supabase SQL Editor. Residents register from the Resident portal. The old SQLite demo logins do not work with Supabase Auth.
 
 Set these optional Vite environment variables to point each portal at a different API host:
 
@@ -92,13 +74,15 @@ VITE_WATER_API_URL=http://localhost:4103
 
 The APIs accept `RESIDENT_API_PORT`, `CEPALCO_API_PORT`, and `WATER_API_PORT` to override their individual listen ports (`PORT` remains a fallback when running one API by itself), `DATABASE_PATH` to configure the SQLite file, and `CORS_ORIGIN` as a comma-separated list of allowed frontend origins. If changing the database location, give all three API processes the same `DATABASE_PATH`.
 
-Advisories are stored centrally. A resident can list advisories; CEPALCO and Water District administrators must authenticate against their respective API, and the server restricts advisory creation, listing, and status changes to that administrator's utility. Login tokens are stored in browser local storage to preserve portal sessions.
+Advisories, work orders, profiles, reports, inbox messages, and water-network readings are stored in Supabase. The app uses Supabase Auth sessions; the utility APIs verify those sessions before handling private provider-integration requests.
 
-The **Virtual SMS inbox** remains a demonstration feature: its records are browser-local and no SMS is sent. Clearing site local storage clears those demo records and drafts, but does not delete backend accounts or advisories.
+The **Virtual SMS inbox** remains a demonstration feature: messages are stored in Supabase, but no SMS is sent. Clearing browser local storage signs the user out; it does not delete Supabase accounts or records.
 
 ## Gmail advisory notifications
 
-CEPALCO and Water District administrators use one announcement composer to enter the report details and affected location, select Facebook, Instagram, Gmail, and/or simulated SMS, and publish immediately or schedule a future announcement. Scheduled announcements are published by their API process; keep the relevant API running at the scheduled time. Existing CEPALCO and Water District advisories are removed once when the updated database schema is first loaded.
+CEPALCO and Water District administrators use utility-specific announcement composers to enter advisory details and affected location, select Facebook, Instagram, Gmail, and/or simulated SMS, and publish immediately or schedule an announcement. Oversized JPEG, PNG, and WebP images up to 15 MB are optimized in the browser. Immediate advisories are saved to Supabase before provider delivery is requested from the utility API. Scheduled advisories are stored in Supabase, but scheduled provider delivery is not yet handled by the Supabase runtime.
+
+Facebook publishing requires `META_FACEBOOK_PAGE_ID` and `META_FACEBOOK_PAGE_ACCESS_TOKEN` in the utility API environment. Instagram publishing requires `META_INSTAGRAM_BUSINESS_ACCOUNT_ID`, an Instagram or Facebook page access token, and `META_PUBLIC_BASE_URL` set to a public HTTPS URL from which Instagram can fetch the saved advisory image. `META_GRAPH_API_VERSION` is optional. Keep all Meta credentials on the server; the utility publish form reports whether the social integrations are configured. Gmail requires the OAuth setup below and an administrator to connect the official sender account. A channel being selectable does not mean its external integration is configured; each publish result reports delivery status.
 
 An advisory is saved even if email delivery cannot complete. After publishing, the utility portal shows how many opted-in resident emails were sent or failed. Per-recipient results are stored in SQLite. An authorized administrator can retry failed deliveries after reconnecting Gmail; residents who have since opted out are excluded from a retry.
 
@@ -123,6 +107,10 @@ Before enabling real delivery, an administrator must complete this one-time setu
 If the connection fails, the portal now identifies common causes, including a redirect URI mismatch, rejected OAuth client, wrong sender account, or missing refresh token. Check that the exact callback URL from step 2 is registered in Google Cloud and that Gmail settings are present in the API environment (not the frontend `.env.local`).
 
 Refresh tokens are encrypted with AES-256-GCM before they are stored in SQLite. They, OAuth client secrets, and the encryption key are never returned to the frontend. If Gmail is not configured, not connected, revoked, or rejects a message, the advisory remains published and the delivery result reports failure instead of claiming an email was sent. The utility admin can inspect `GET /advisories/:id/email-delivery` and retry failed recipients with `POST /advisories/:id/email-delivery/retry` on that utility's API.
+
+An authorized Gmail sender is connected once per utility and its encrypted refresh token is retained in the shared SQLite database. Keep `GMAIL_TOKEN_ENCRYPTION_KEY` stable across restarts and make the same value available to each API process (a root `cas/.env` can provide shared settings; a workspace API `.env` overrides it). Do not delete or replace the database or encryption key during normal restarts; either action can require administrators to reconnect. CEPALCO and Water District sender accounts are separate utility connections.
+
+When Meta returns public post permalinks, they are saved with the advisory, shown as Facebook/Instagram links in resident and admin advisory feeds, and included in Gmail notices sent after social publishing. Gmail is sent only to residents who opted in to immediate advisory emails. All published advisories are visible in the resident advisory feed; social and email delivery are additional channels, not prerequisites for feed visibility.
 
 **Live email delivery has not been verified in this environment.** It requires the Google Cloud setup above, an authorized official Gmail account connected by a utility administrator, and at least one real resident who explicitly opted in. Tests exercise OAuth scope construction, token encryption, message formatting, opt-in filtering, scheduled announcements, and simulated SMS without sending real email or SMS.
 

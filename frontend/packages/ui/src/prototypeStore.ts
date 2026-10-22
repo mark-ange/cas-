@@ -3,7 +3,7 @@ import { portalSettings } from "./prototypeSettings.js";
 export type Portal = "resident" | "cepalco" | "water";
 export type Status = "Operational" | "Monitoring" | "Under investigation" | "Scheduled" | "Resolved" | "Received" | "Crew dispatched";
 export type Actor = {
-  id: number;
+  id: number | string;
   name: string;
   email: string;
   role: "resident" | "admin";
@@ -31,6 +31,11 @@ export type Advisory = {
   details: string;
   createdAt: string;
   scheduledAt?: string | null;
+  priority?: string;
+  serviceStartsAt?: string | null;
+  estimatedRestorationAt?: string | null;
+  facebookUrl?: string | null;
+  instagramUrl?: string | null;
   publicationStatus?: "scheduled" | "publishing" | "published" | "failed";
   channels?: string[];
   channelsJson?: string;
@@ -39,7 +44,7 @@ export type Advisory = {
 export type WorkOrder = { id: number; reference: string; title: string; utility: string; area: string; status: string; startsAt: string; endsAt: string; description?: string };
 export type ServiceReport = { id: number; reference: string; title: string; utility: string; area: string; status: Status; details?: string; createdAt: string };
 export type NetworkReading = { district: string; area: string; pressurePsi: number; reservoirPercent: number; recordedAt: string };
-export type SMSRecord = { id: number; recipientId?: number; recipient: string; phoneNumber: string; utility: string; reference: string; body: string; createdAt: string; status: "Simulated"; read: boolean };
+export type SMSRecord = { id: number; recipientId?: number | string; recipient: string; phoneNumber: string; utility: string; reference: string; body: string; createdAt: string; status: "Simulated"; read: boolean };
 
 type LocalAccount = { actor: Actor; password: string };
 type PrototypeData = {

@@ -3,19 +3,6 @@ import { createRoot } from "react-dom/client";
 import { uiCopy } from "./prototypeCopy.js";
 import { portalSettings as localPortalSettings, type PortalSettings } from "./prototypeSettings.js";
 import {
-  changePassword,
-  createAdvisory,
-  createWorkOrder,
-  getActor,
-  getVirtualInbox,
-  getWorkspace,
-  login as localLogin,
-  markVirtualInboxRead,
-  registerResident,
-  signOut as localSignOut,
-  updateAdvisory,
-  updateProfile,
-  updateReport,
   type Actor,
   type Advisory,
   type NetworkReading,
@@ -26,6 +13,8 @@ import {
   type WorkOrder,
 } from "./prototypeStore.js";
 import { GoogleMap, type CivicAlertMapAnnouncement, type CivicAlertMapLocation } from "./GoogleMaps.js";
+import { getSupabase } from "./supabase.js";
+import { supabaseAction } from "./supabaseActions.js";
 import "./styles.css";
 
 const portalSettings = localPortalSettings;
@@ -62,33 +51,20 @@ function apiBaseUrl(portal: Portal): string {
 
 function announcementImageUrl(item: Advisory, portal: Portal): string | null {
   if (!item.imageUrl) return null;
+  if (item.imageUrl.startsWith("data:")) return item.imageUrl;
   const imagePortal = portal === "resident"
     ? item.utility === "Water District" ? "water" : "cepalco"
     : portal;
   return `${apiBaseUrl(imagePortal)}${item.imageUrl}`;
 }
 
-// ADDED: Read and validate an optional announcement image for the Gmail attachment.
 async function readAnnouncementImage(file: FormDataEntryValue | null): Promise<string | null> {
-  // An unselected file input produces an empty File; treat it as no attachment.
-  if (!(file instanceof File) || file.size === 0) {
-    return null;
-  }
-
+  if (!(file instanceof File) || file.size === 0) return null;
   const allowedTypes = ["image/jpeg", "image/png", "image/webp"];
-
-  // Keep frontend limits aligned with the backend/Gmail attachment validation.
-  if (!allowedTypes.includes(file.type)) {
-    throw new Error("Choose a JPEG, PNG, or WebP image.");
-  }
-  if (file.size > 1_000_000) {
-    throw new Error("The announcement image must be 1 MB or smaller.");
-  }
-
-  // Convert the selected image to a data URL for the existing JSON API request.
-  return new Promise<string>((resolve, reject) => {
+  if (!allowedTypes.includes(file.type)) throw new Error("Choose a JPEG, PNG, or WebP image.");
+  if (file.size > 15_000_000) throw new Error("Choose an image smaller than 15 MB.");
+  const toDataUrl = (image: Blob) => new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
-
     reader.onload = () => {
       if (typeof reader.result === "string") {
         resolve(reader.result);
@@ -98,8 +74,43 @@ async function readAnnouncementImage(file: FormDataEntryValue | null): Promise<s
     };
 
     reader.onerror = () => reject(new Error("Could not read the selected image."));
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(image);
   });
+
+  if (file.size <= 1_000_000) return toDataUrl(file);
+
+  let bitmap: ImageBitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    throw new Error("This image could not be opened. Try another JPEG, PNG, or WebP file.");
+  }
+
+  try {
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Image optimization is unavailable in this browser.");
+    let scale = Math.min(1, 2048 / Math.max(bitmap.width, bitmap.height));
+    for (let dimensionAttempt = 0; dimensionAttempt < 8; dimensionAttempt += 1) {
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      for (const quality of [0.86, 0.76, 0.66, 0.56]) {
+        const optimized = await new Promise<Blob>((resolve, reject) => {
+          canvas.toBlob(blob => blob
+            ? resolve(blob)
+            : reject(new Error("Could not optimize this image. Try another file.")), "image/jpeg", quality);
+        });
+        if (optimized.size <= 1_000_000) return await toDataUrl(optimized);
+      }
+      scale *= 0.8;
+    }
+  } finally {
+    bitmap.close();
+  }
+  throw new Error("This image could not be reduced below 1 MB. Choose a smaller or lower-resolution image.");
 }
 
 // ADDED: Convert existing API advisory records into validated map markers.
@@ -144,15 +155,8 @@ function Icon({ name, className = "h-5 w-5" }: { name: string; className?: strin
 }
 
 async function localAction<T>(portal: Portal, path: string, _token: string | null, options: RequestInit = {}): Promise<T> {
-  const method = options.method || "GET";
-  const body = options.body ? JSON.parse(String(options.body)) as Record<string, FormDataEntryValue> : {};
-  const backendAction = path === "/auth/me" || path === "/auth/login" || path === "/auth/register" ||
-    path === "/auth/profile" || path === "/auth/password" || path === "/advisories" ||
-    path === "/email/gmail/status" || path === "/email/gmail/connect" || path === "/inbox" ||
-    /^\/inbox\/\d+\/read$/.test(path) ||
-    /^\/advisories\/\d+\/status$/.test(path) || /^\/advisories\/\d+\/email-delivery\/retry$/.test(path) ||
-    /^\/reports\/\d+\/status$/.test(path) || path === "/work-orders" ||
-    path === "/reports" || path === "/network";
+  const backendAction = path === "/email/gmail/status" || path === "/email/gmail/connect" ||
+    path === "/social/status" || /^\/advisories\/\d+\/email-delivery\/retry$/.test(path);
   if (backendAction) {
     const headers = new Headers(options.headers);
     if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
@@ -167,53 +171,7 @@ async function localAction<T>(portal: Portal, path: string, _token: string | nul
     }
     return result as T;
   }
-  let result: unknown;
-  if (path === "/auth/me") {
-    const actor = getActor(portal);
-    if (!actor) throw new Error("Please sign in to continue.");
-    result = { actor };
-  } else if (path === "/auth/login" && method === "POST") {
-    const actor = localLogin(portal, String(body.email ?? ""), String(body.password ?? ""));
-    result = { token: String(actor.id), actor };
-  } else if (path === "/auth/register" && method === "POST") {
-    const actor = registerResident(body);
-    result = { token: String(actor.id), actor };
-  } else if (path === "/auth/profile" && method === "PATCH") {
-    const actor = getActor(portal);
-    if (!actor) throw new Error("Please sign in to continue.");
-    result = { actor: updateProfile(actor.id, body, typeof body.profileImage === "string" ? body.profileImage : null) };
-  } else if (path === "/auth/password" && method === "POST") {
-    const actor = getActor(portal);
-    if (!actor) throw new Error("Please sign in to continue.");
-    changePassword(actor.id, String(body.currentPassword ?? ""), String(body.newPassword ?? ""));
-    result = { ok: true };
-  } else if (path === "/advisories" && method === "GET") {
-    result = getWorkspace(portal).advisories;
-  } else if (path === "/advisories" && method === "POST") {
-    result = createAdvisory(portal, body);
-  } else if (path.startsWith("/advisories/") && path.endsWith("/status") && method === "PATCH") {
-    updateAdvisory(Number(path.split("/")[2]), String(body.status) as Status);
-    result = { ok: true };
-  } else if (path === "/work-orders" && method === "GET") {
-    result = getWorkspace(portal).workOrders;
-  } else if (path === "/work-orders" && method === "POST") {
-    result = createWorkOrder(portal, body);
-  } else if (path === "/reports" && method === "GET") {
-    result = getWorkspace(portal).reports;
-  } else if (path.startsWith("/reports/") && path.endsWith("/status") && method === "PATCH") {
-    updateReport(Number(path.split("/")[2]), String(body.status) as Status);
-    result = { ok: true };
-  } else if (path === "/network" && method === "GET") {
-    result = getWorkspace(portal).network;
-  } else if (path === "/inbox" && method === "GET") {
-    result = getVirtualInbox(portal);
-  } else if (path.startsWith("/inbox/") && path.endsWith("/read") && method === "PATCH") {
-    markVirtualInboxRead(Number(path.split("/")[2]));
-    result = { ok: true };
-  } else {
-    throw new Error(`Unsupported local prototype action: ${method} ${path}`);
-  }
-  return result as T;
+  return supabaseAction<T>(portal, path, options);
 }
 
 function Brand({ portal }: { portal: Portal }) {
@@ -274,88 +232,461 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
     setConfirmPassword("");
   }
 
-  const inputClass = "block w-full rounded-lg border border-[#ded6d3] bg-[#fffdfc] px-3 py-2.5 text-xs font-normal text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-[#632552] focus:ring-2 focus:ring-[#632552]/10";
-  const labelClass = "block text-[10px] font-bold text-slate-800";
+  const inputClass = "block w-full rounded-xl border border-slate-300 bg-slate-50/60 px-3.5 py-3 text-sm font-medium text-slate-900 outline-none transition placeholder:text-slate-400 hover:border-slate-400 focus:bg-white focus:border-rose-600 focus:ring-4 focus:ring-rose-500/15";
+  const labelClass = "block text-xs font-bold uppercase tracking-wider text-slate-700";
 
-  return <main className="resident-auth min-h-screen bg-[#fbf8f6] text-[#21172a]">
-    <header className="resident-auth-header flex h-14 items-center justify-between border-b border-[#eee6e3] bg-white px-4 sm:px-8">
-      <a href="/?portal=resident" className="flex items-center gap-2.5 text-sm font-extrabold tracking-tight text-slate-900 no-underline"><span className="grid h-8 w-8 place-items-center rounded-lg bg-[#251532] text-white"><Icon name="shield" className="h-4 w-4" /></span><span>{copy("copy_57f90a2f0d6f")}<small className="ml-2 rounded border border-[#ded6d3] px-1.5 py-0.5 text-[8px] font-medium tracking-normal text-slate-500">{copy("copy_93257a2664ba")}</small></span></a>
-      <nav className="hidden items-center gap-8 text-[10px] font-medium text-slate-600 md:flex" aria-label={copy("copy_ad85c25cd0fe")}>{requiredSetting(settingsFor("resident").publicNavigation, "resident.publicNavigation").map(label => <span key={label}>{label}</span>)}</nav>
-      {mode === "login" ? <button onClick={() => switchMode("register")} className="text-[10px] font-bold text-slate-800">{copy("copy_798ca2ce18bf")}</button> : <button onClick={() => switchMode("login")} className="text-[10px] font-bold text-slate-800">{copy("copy_c189840cf7e2")}</button>}
-    </header>
+  return <main className="resident-auth relative min-h-screen flex flex-col justify-center overflow-x-hidden bg-slate-950 text-slate-100 selection:bg-rose-500 selection:text-white">
+    {/* Ambient Aurora Glow Lighting */}
+    <div className="pointer-events-none absolute -top-40 -left-40 h-[650px] w-[650px] rounded-full bg-rose-600/15 blur-[140px]" />
+    <div className="pointer-events-none absolute -bottom-40 -right-40 h-[650px] w-[650px] rounded-full bg-indigo-600/15 blur-[140px]" />
+    <div className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[800px] w-[800px] rounded-full bg-sky-500/5 blur-[160px]" />
 
-    <section className="resident-auth-wrap mx-auto max-w-[1240px] px-3 py-5 sm:px-6 sm:py-8">
-      <div className={`resident-auth-card grid overflow-hidden rounded-xl border border-[#eee4df] bg-white shadow-[0_15px_45px_rgba(46,21,43,.12)] lg:grid-cols-[.72fr_1fr] ${mode === "register" ? "resident-register-card" : ""}`}>
-        <aside className="resident-auth-art relative flex flex-col justify-between overflow-hidden p-6 text-white sm:p-9 lg:min-h-[570px] lg:p-10">
-          <div className="relative z-10"><p className="mb-2 text-[8px] font-semibold text-white/70">{copy("copy_89ef45eb41e5")}</p><div className="flex items-center gap-2"><span className="grid h-8 w-8 place-items-center rounded-lg bg-white/15"><Icon name="shield" className="h-4 w-4" /></span><span className="text-xs font-extrabold tracking-wide">{copy("copy_57f90a2f0d6f")}<small className="ml-1 font-normal text-white/70">{copy("copy_a5e005832c4e")}</small></span></div></div>
-          <div className="relative z-10 my-7 max-w-md lg:my-0">
-            <span className="mb-4 inline-flex rounded-full border border-white/20 bg-white/10 px-3 py-1 text-[8px] font-bold tracking-[.12em] text-white/90">{mode === "register" ? copy("copy_82e9d65b52ad") : copy("copy_47a64da286f4")}</span>
-            <h1 className="mb-3 max-w-sm text-3xl font-extrabold leading-tight tracking-tight sm:text-4xl">{mode === "register" ? copy("copy_6abdc4acc7a5") : copy("copy_3ab7b05a2c0a")}</h1>
-            <p className="mb-5 max-w-md text-[11px] leading-5 text-white/75">{mode === "register" ? copy("copy_a84c194716ff") : copy("copy_4a5daf58060f")}</p>
-            {mode === "register" ? <div className="space-y-3">{requiredSetting(settingsFor("resident").registerHighlights, "resident.registerHighlights").map(({ icon, title, detail }) => <div key={title} className="flex gap-3"><span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-white/10 text-amber-200"><Icon name={icon} className="h-3.5 w-3.5" /></span><span><strong className="block text-[10px]">{title}</strong><small className="mt-0.5 block text-[8px] leading-4 text-white/65">{detail}</small></span></div>)}</div> : <div className="flex gap-2"><span className="rounded-md border border-white/15 bg-white/10 px-3 py-2 text-[9px]">{copy("copy_e678b8628ae8")}</span><span className="rounded-md border border-white/15 bg-white/10 px-3 py-2 text-[9px]">{copy("copy_246e670cb71d")}</span></div>}
+    {/* Main Authentication Showcase Container */}
+    <section className="resident-auth-wrap relative z-10 flex flex-1 items-center justify-center px-4 py-8 sm:px-6 lg:px-8">
+      <div className={`resident-auth-card w-full max-w-[1180px] grid overflow-hidden rounded-2xl border border-white/10 bg-slate-900/90 shadow-[0_25px_60px_-15px_rgba(0,0,0,0.7)] backdrop-blur-2xl transition-all duration-300 lg:grid-cols-[1.05fr_1fr] ${mode === "register" ? "resident-register-card max-w-[1260px] lg:grid-cols-[0.8fr_1.2fr]" : ""}`}>
+
+        {/* Left Panel: Civic Authority & Telemetry Hero */}
+        <aside className="resident-auth-art relative flex flex-col justify-between overflow-hidden border-b border-white/10 bg-gradient-to-br from-slate-950 via-slate-900/95 to-slate-900 p-8 text-white sm:p-10 lg:border-b-0 lg:border-r lg:p-12">
+          <div className="pointer-events-none absolute inset-0 opacity-10 bg-[radial-gradient(#e2e8f0_1px,transparent_1px)] [background-size:16px_16px]" />
+
+          <div className="relative z-10">
+            <p className="mb-2 text-xs font-bold uppercase tracking-wider text-rose-400">
+              {copy("copy_89ef45eb41e5")}
+            </p>
+            <div className="flex items-center gap-2.5">
+              <span className="grid h-9 w-9 place-items-center rounded-xl bg-white/10 ring-1 ring-white/15">
+                <Icon name="shield" className="h-5 w-5 text-rose-300" />
+              </span>
+              <span className="text-sm font-extrabold tracking-wide">
+                {copy("copy_57f90a2f0d6f")}
+                <span className="ml-2 font-normal text-slate-300">{copy("copy_a5e005832c4e")}</span>
+              </span>
+            </div>
           </div>
-          <div className="relative z-10 border-t border-white/15 pt-4"><div className="mb-3 flex gap-8 text-[9px] text-white/70"><span><strong className="block text-sm text-white">{copy("copy_4d8974777af1")}</strong>{copy("copy_51d91d456fe8")}</span><span><strong className="block text-sm text-white">{copy("copy_8c31e6e72230")}</strong>{copy("copy_dfcc74dff330")}</span></div><p className="m-0 text-[8px] text-white/50">{copy("copy_a3c1dd22eac2")}</p></div>
-        </aside>
 
-        <section className="resident-auth-form flex flex-col justify-center p-5 sm:p-8 lg:px-10 lg:py-8">
-          <div className="mb-4 flex items-center justify-between"><p className="m-0 rounded-full bg-[#f7eff4] px-3 py-1 text-[8px] font-bold tracking-wide text-[#71385f]">{mode === "register" ? copy("copy_5278b6dded60") : copy("copy_b80752d1ea40")}</p><span className="text-[8px] text-slate-500">{copy("copy_d6acd37dc90e")}</span></div>
-          {mode === "login" ? <>
-            <h2 className="mb-1 text-xl font-extrabold tracking-tight text-slate-950 sm:text-2xl">{copy("copy_54f9715d07d2")}</h2>
-            <p className="mb-5 text-[10px] text-slate-500">{copy("copy_75df0b478fe8")}</p>
-            <form onSubmit={onLogin} className="space-y-3.5">
-              <label className={labelClass}>{copy("copy_f2488fd4ef4a")}<input name="email" type="email" autoComplete="username" required placeholder={copy("copy_7b17fb0bd173")} className={`${inputClass} mt-1.5`} /></label>
-              <label className={labelClass}>{copy("copy_e7cf3ef4f17c")}<input name="password" type="password" autoComplete="current-password" required placeholder={copy("copy_c06bf9670174")} className={`${inputClass} mt-1.5`} /></label>
-              <p className="m-0 text-right text-[8px] text-slate-400">{copy("copy_854fcaa4eae2")}</p>
-              {(error || localError) && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-xs text-rose-800">{localError || error}</p>}
-              <button disabled={busy} className="w-full rounded-lg bg-[#64234f] px-4 py-3 text-[10px] font-bold text-white shadow-sm hover:bg-[#4d1a3d] disabled:opacity-60">{busy ? copy("copy_8b9d3de8ae00") : copy("copy_9ad3f03694b9")}</button>
-            </form>
-            <p className="mt-4 text-center text-[9px] text-slate-500">{copy("copy_5c5d4ae1083b")}<button onClick={() => switchMode("register")} className="font-bold text-[#64234f] underline">{copy("copy_14272ede1c39")}</button></p>
-            <p className="mt-4 border-t border-slate-100 pt-4 text-center text-[8px] text-slate-400">{copy("copy_5df1da863fb0")}</p>
-          </> : <>
-            <h2 className="mb-1 text-xl font-extrabold tracking-tight text-slate-950 sm:text-2xl">{copy("copy_8d162b371011")}</h2>
-            <p className="mb-4 text-[10px] leading-4 text-slate-500">{copy("copy_124ed6be4b83")}</p>
-            <form onSubmit={submitRegistration} className="space-y-3">
-              <label className={labelClass}>{copy("copy_e52e32bd2ddb")}<span className="text-rose-600">{copy("copy_684888c0ebb1")}</span><input name="name" required maxLength={120} autoComplete="name" placeholder={copy("copy_d636827b1783")} className={`${inputClass} mt-1.5`} /></label>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <label className={labelClass}>{copy("copy_fa12ae8c3d6f")}<span className="text-rose-600">{copy("copy_684888c0ebb1")}</span><input name="phoneNumber" type="tel" required maxLength={40} autoComplete="tel" placeholder={copy("copy_65bc675f13d8")} className={`${inputClass} mt-1.5`} /><small className="mt-1 block text-[8px] font-normal text-slate-500">{copy("copy_21c340f2cd3d")}</small></label>
-                <label className={labelClass}>{copy("copy_97c04721f9d3")}<span className="text-rose-600">{copy("copy_684888c0ebb1")}</span><input name="email" type="email" autoComplete="email" required placeholder={copy("copy_39a22add5269")} className={`${inputClass} mt-1.5`} /><small className="mt-1 block text-[8px] font-normal text-slate-500">{copy("copy_f8fe71ad3fc4")}</small></label>
-              </div>
-              <fieldset className="rounded-lg border border-[#eee4df] bg-[#fbf8f6] p-3">
-                <legend className="px-1 text-[9px] font-bold text-[#5f3156]">{copy("copy_856936b55ec1")}</legend>
-                <div className="grid gap-3">
-                  <label className={labelClass}>{copy("copy_440467b52757")}<span className="text-rose-600">{copy("copy_684888c0ebb1")}</span><input name="address" required maxLength={240} autoComplete="street-address" placeholder={copy("copy_43bc6228d8b4")} className={`${inputClass} mt-1.5`} /></label>
-                  <div className="grid gap-3 sm:grid-cols-[1fr_125px]">
-                    <label className={labelClass}>{copy("copy_52630f30e6ef")}<span className="text-rose-600">{copy("copy_684888c0ebb1")}</span><input name="barangay" list="resident-barangays" required maxLength={100} autoComplete="address-level3" placeholder={copy("copy_c3b5b226013a")} className={`${inputClass} mt-1.5`} /><datalist id="resident-barangays">{requiredSetting(settingsFor("resident").barangays, "resident.barangays").map(name => <option key={name} value={name} />)}</datalist></label>
-                    <label className={labelClass}>{copy("copy_18c62c7ea10b")}<span className="text-rose-600">{copy("copy_684888c0ebb1")}</span><input name="postalCode" required maxLength={20} autoComplete="postal-code" placeholder={locationDefaults.postalCode} defaultValue={locationDefaults.postalCode} className={`${inputClass} mt-1.5`} /></label>
+          <div className="relative z-10 my-8 max-w-lg lg:my-6">
+            <span className="mb-4 inline-flex items-center gap-2 rounded-full border border-rose-500/30 bg-rose-500/15 px-3.5 py-1 text-xs font-bold uppercase tracking-wider text-rose-300">
+              <span className="h-1.5 w-1.5 rounded-full bg-rose-400 animate-pulse" />
+              {mode === "register" ? copy("copy_82e9d65b52ad") : copy("copy_47a64da286f4")}
+            </span>
+            <h1 className="mb-4 text-3xl font-extrabold leading-tight tracking-tight text-white sm:text-4xl">
+              {mode === "register" ? copy("copy_6abdc4acc7a5") : copy("copy_3ab7b05a2c0a")}
+            </h1>
+            <p className="mb-6 text-sm leading-relaxed text-slate-300">
+              {mode === "register" ? copy("copy_a84c194716ff") : copy("copy_4a5daf58060f")}
+            </p>
+
+            {mode === "register" ? (
+              <div className="space-y-3.5">
+                {requiredSetting(settingsFor("resident").registerHighlights, "resident.registerHighlights").map(({ icon, title, detail }) => (
+                  <div key={title} className="flex gap-3.5 rounded-xl border border-white/10 bg-white/5 p-3.5 transition hover:bg-white/10">
+                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-rose-500/20 text-rose-300 ring-1 ring-rose-500/30">
+                      <Icon name={icon} className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <strong className="block text-xs font-bold text-white">{title}</strong>
+                      <span className="mt-0.5 block text-xs leading-relaxed text-slate-300">{detail}</span>
+                    </div>
                   </div>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <label className={labelClass}>{copy("copy_338de443b2af")}<span className="text-rose-600">{copy("copy_684888c0ebb1")}</span><select name="district" required defaultValue="" className={`${inputClass} mt-1.5`}><option value={copy("copy_e3b0c44298fc")} disabled>{copy("copy_11aaa5f43d2b")}</option>{requiredSetting(settingsFor("resident").districts, "resident.districts").map(district => <option key={district}>{district}</option>)}</select></label>
-                    <label className={labelClass}>{copy("copy_04b621f376b3")}<input name="city" required value={locationDefaults.city} readOnly className={`${inputClass} mt-1.5 bg-slate-100`} /></label>
+                ))}
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-xl border border-white/10 bg-white/5 p-3.5 backdrop-blur-sm">
+                    <div className="flex items-center gap-2 text-xs font-bold text-amber-300">
+                      <Icon name="shield" className="h-4 w-4 text-amber-400" />
+                      CEPALCO Power Grid
+                    </div>
+                    <p className="mt-1 text-xs text-slate-300">Continuous feeder telemetry across 80 urban & rural barangays</p>
+                    <span className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">
+                      ● Active Dispatch
+                    </span>
+                  </div>
+
+                  <div className="rounded-xl border border-white/10 bg-white/5 p-3.5 backdrop-blur-sm">
+                    <div className="flex items-center gap-2 text-xs font-bold text-cyan-300">
+                      <Icon name="shield" className="h-4 w-4 text-cyan-400" />
+                      Water District (COWD)
+                    </div>
+                    <p className="mt-1 text-xs text-slate-300">Pressure maintenance & emergency pipe repair advisories</p>
+                    <span className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold text-cyan-300">
+                      ● Live Feeds
+                    </span>
                   </div>
                 </div>
-              </fieldset>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <label className={labelClass}>{copy("copy_68ecf962332c")}<span className="text-rose-600">{copy("copy_684888c0ebb1")}</span><input name="password" type="password" required minLength={8} autoComplete="new-password" value={password} onChange={event => setPassword(event.target.value)} placeholder={copy("copy_977f3b2676a9")} className={`${inputClass} mt-1.5`} /><small className="mt-1 block text-[8px] font-normal text-slate-500">{copy("copy_aa7e8499fa62")}</small></label>
-                <label className={labelClass}>{copy("copy_b186ebc5096d")}<span className="text-rose-600">{copy("copy_684888c0ebb1")}</span><input name="confirmPassword" type="password" required minLength={8} autoComplete="new-password" value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} placeholder={copy("copy_210dfc7e4536")} className={`${inputClass} mt-1.5`} /><small className="mt-1 block text-[8px] font-normal text-slate-500">{strength ? `Password strength: ${strength}` : copy("copy_551df75ec882")}</small></label>
+
+                <div className="flex flex-wrap gap-2 pt-2">
+                  <span className="rounded-lg border border-white/15 bg-white/10 px-3.5 py-1.5 text-xs font-semibold text-slate-200">
+                    {copy("copy_e678b8628ae8")}
+                  </span>
+                  <span className="rounded-lg border border-white/15 bg-white/10 px-3.5 py-1.5 text-xs font-semibold text-slate-200">
+                    {copy("copy_246e670cb71d")}
+                  </span>
+                </div>
               </div>
-              {(error || localError) && <p role="alert" className="rounded-lg bg-rose-50 p-2.5 text-[10px] text-rose-800">{localError || error}</p>}
-              <label className="flex items-start gap-2 text-[8px] leading-4 text-slate-600"><input name="termsAccepted" type="checkbox" required className="mt-0.5 accent-[#64234f]" /><span>{copy("copy_bdb74034a9d2")}<strong className="text-[#64234f]">{copy("copy_add882140045")}</strong></span></label>
-              <label className="flex items-start gap-2 text-[8px] leading-4 text-slate-600"><input name="smsAlerts" type="checkbox" defaultChecked className="mt-0.5 accent-[#64234f]" /><span>{copy("copy_e2d06d28e9c3")}</span></label>
-              <label className="flex items-start gap-2 text-[8px] leading-4 text-slate-600"><input name="immediateEmailAlerts" type="checkbox" className="mt-0.5 accent-[#64234f]" /><span><strong className="block">{copy("immediateEmailAlertsTitle")}</strong>{copy("immediateEmailAlertsInfo")}</span></label>
-              <button disabled={busy} className="w-full rounded-lg bg-[#64234f] px-4 py-3 text-[10px] font-bold text-white shadow-sm hover:bg-[#4d1a3d] disabled:opacity-60">{busy ? copy("copy_f2daf61e527b") : copy("copy_582e329beb8d")}</button>
-            </form>
-            <p className="mt-3 text-center text-[9px] text-slate-500">{copy("copy_04a38dd010ed")}<button onClick={() => switchMode("login")} className="font-bold text-[#64234f] underline">{copy("copy_3233beba694b")}</button></p>
-            <p className="mt-3 border-t border-slate-100 pt-3 text-center text-[8px] text-slate-400">{copy("copy_d66ba85e9208")}</p>
-          </>}
+            )}
+          </div>
+
+          <div className="relative z-10 border-t border-white/10 pt-5">
+            <div className="mb-3 flex flex-wrap gap-8 text-xs text-slate-400">
+              <span>
+                <strong className="block text-lg font-bold text-white">{copy("copy_4d8974777af1")}</strong>
+                {copy("copy_51d91d456fe8")}
+              </span>
+              <span>
+                <strong className="block text-lg font-bold text-white">{copy("copy_8c31e6e72230")}</strong>
+                {copy("copy_dfcc74dff330")}
+              </span>
+            </div>
+            <p className="m-0 text-[11px] text-slate-400">{copy("copy_a3c1dd22eac2")}</p>
+          </div>
+        </aside>
+
+        {/* Right Panel: Clean Modern Authentication Form */}
+        <section className="resident-auth-form flex flex-col justify-center bg-white p-6 sm:p-10 lg:p-12 text-slate-900">
+          {/* Segmented Mode Switcher */}
+          <div className="mb-6 flex rounded-xl bg-slate-100 p-1.5 ring-1 ring-slate-200/80">
+            <button
+              type="button"
+              onClick={() => switchMode("login")}
+              className={`flex-1 rounded-lg py-2 text-xs font-bold transition-all ${
+                mode === "login"
+                  ? "bg-white text-slate-950 shadow-sm"
+                  : "text-slate-600 hover:text-slate-950"
+              }`}
+            >
+              {copy("copy_c189840cf7e2")}
+            </button>
+            <button
+              type="button"
+              onClick={() => switchMode("register")}
+              className={`flex-1 rounded-lg py-2 text-xs font-bold transition-all ${
+                mode === "register"
+                  ? "bg-white text-slate-950 shadow-sm"
+                  : "text-slate-600 hover:text-slate-950"
+              }`}
+            >
+              {copy("copy_798ca2ce18bf")}
+            </button>
+          </div>
+
+          <div className="mb-4 flex items-center justify-between">
+            <p className="m-0 rounded-full bg-rose-50 px-3 py-1 text-xs font-bold tracking-wide text-rose-800">
+              {mode === "register" ? copy("copy_5278b6dded60") : copy("copy_b80752d1ea40")}
+            </p>
+            <span className="text-xs text-slate-500">{copy("copy_d6acd37dc90e")}</span>
+          </div>
+
+          {mode === "login" ? (
+            <>
+              <h2 className="mb-1 text-2xl font-extrabold tracking-tight text-slate-950 sm:text-3xl">
+                {copy("copy_54f9715d07d2")}
+              </h2>
+              <p className="mb-6 text-xs text-slate-500 font-normal">
+                {copy("copy_75df0b478fe8")}
+              </p>
+
+              <form onSubmit={onLogin} className="space-y-4">
+                <label className={labelClass}>
+                  {copy("copy_f2488fd4ef4a")}
+                  <input
+                    name="email"
+                    type="email"
+                    autoComplete="username"
+                    required
+                    placeholder={copy("copy_7b17fb0bd173")}
+                    className={`${inputClass} mt-1.5`}
+                  />
+                </label>
+
+                <label className={labelClass}>
+                  <div className="flex items-center justify-between">
+                    <span>{copy("copy_e7cf3ef4f17c")}</span>
+                    <span className="text-[11px] font-normal text-slate-400 lowercase">{copy("copy_854fcaa4eae2")}</span>
+                  </div>
+                  <input
+                    name="password"
+                    type="password"
+                    autoComplete="current-password"
+                    required
+                    placeholder={copy("copy_c06bf9670174")}
+                    className={`${inputClass} mt-1.5`}
+                  />
+                </label>
+
+                {(error || localError) && (
+                  <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3.5 text-xs font-semibold text-rose-800">
+                    {localError || error}
+                  </p>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="w-full rounded-xl bg-gradient-to-r from-rose-600 to-rose-700 hover:from-rose-700 hover:to-rose-800 py-3.5 px-4 text-xs font-bold uppercase tracking-wider text-white shadow-lg shadow-rose-600/25 transition active:scale-[0.99] disabled:opacity-60"
+                >
+                  {busy ? copy("copy_8b9d3de8ae00") : copy("copy_9ad3f03694b9")}
+                </button>
+              </form>
+
+              <p className="mt-5 text-center text-xs text-slate-600">
+                {copy("copy_5c5d4ae1083b")}
+                <button onClick={() => switchMode("register")} className="font-bold text-rose-700 hover:underline">
+                  {copy("copy_14272ede1c39")}
+                </button>
+              </p>
+
+              <p className="mt-4 border-t border-slate-100 pt-4 text-center text-xs text-slate-400">
+                {copy("copy_5df1da863fb0")}
+              </p>
+            </>
+          ) : (
+            <>
+              <h2 className="mb-1 text-2xl font-extrabold tracking-tight text-slate-950 sm:text-3xl">
+                {copy("copy_8d162b371011")}
+              </h2>
+              <p className="mb-4 text-xs leading-relaxed text-slate-500">
+                {copy("copy_124ed6be4b83")}
+              </p>
+
+              <form onSubmit={submitRegistration} className="space-y-3.5">
+                <label className={labelClass}>
+                  {copy("copy_e52e32bd2ddb")}
+                  <span className="text-rose-600 ml-1">{copy("copy_684888c0ebb1")}</span>
+                  <input
+                    name="name"
+                    required
+                    maxLength={120}
+                    autoComplete="name"
+                    placeholder={copy("copy_d636827b1783")}
+                    className={`${inputClass} mt-1.5`}
+                  />
+                </label>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className={labelClass}>
+                    {copy("copy_fa12ae8c3d6f")}
+                    <span className="text-rose-600 ml-1">{copy("copy_684888c0ebb1")}</span>
+                    <input
+                      name="phoneNumber"
+                      type="tel"
+                      required
+                      maxLength={40}
+                      autoComplete="tel"
+                      placeholder={copy("copy_65bc675f13d8")}
+                      className={`${inputClass} mt-1.5`}
+                    />
+                    <small className="mt-1 block text-[11px] font-normal text-slate-500">{copy("copy_21c340f2cd3d")}</small>
+                  </label>
+
+                  <label className={labelClass}>
+                    {copy("copy_97c04721f9d3")}
+                    <span className="text-rose-600 ml-1">{copy("copy_684888c0ebb1")}</span>
+                    <input
+                      name="email"
+                      type="email"
+                      autoComplete="email"
+                      required
+                      placeholder={copy("copy_39a22add5269")}
+                      className={`${inputClass} mt-1.5`}
+                    />
+                    <small className="mt-1 block text-[11px] font-normal text-slate-500">{copy("copy_f8fe71ad3fc4")}</small>
+                  </label>
+                </div>
+
+                <fieldset className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+                  <legend className="px-2 text-xs font-bold uppercase tracking-wider text-rose-800">
+                    {copy("copy_856936b55ec1")}
+                  </legend>
+                  <div className="grid gap-3">
+                    <label className={labelClass}>
+                      {copy("copy_440467b52757")}
+                      <span className="text-rose-600 ml-1">{copy("copy_684888c0ebb1")}</span>
+                      <input
+                        name="address"
+                        required
+                        maxLength={240}
+                        autoComplete="street-address"
+                        placeholder={copy("copy_43bc6228d8b4")}
+                        className={`${inputClass} mt-1.5`}
+                      />
+                    </label>
+
+                    <div className="grid gap-3 sm:grid-cols-[1fr_130px]">
+                      <label className={labelClass}>
+                        {copy("copy_52630f30e6ef")}
+                        <span className="text-rose-600 ml-1">{copy("copy_684888c0ebb1")}</span>
+                        <input
+                          name="barangay"
+                          list="resident-barangays"
+                          required
+                          maxLength={100}
+                          autoComplete="address-level3"
+                          placeholder={copy("copy_c3b5b226013a")}
+                          className={`${inputClass} mt-1.5`}
+                        />
+                        <datalist id="resident-barangays">
+                          {requiredSetting(settingsFor("resident").barangays, "resident.barangays").map(name => (
+                            <option key={name} value={name} />
+                          ))}
+                        </datalist>
+                      </label>
+
+                      <label className={labelClass}>
+                        {copy("copy_18c62c7ea10b")}
+                        <span className="text-rose-600 ml-1">{copy("copy_684888c0ebb1")}</span>
+                        <input
+                          name="postalCode"
+                          required
+                          maxLength={20}
+                          autoComplete="postal-code"
+                          placeholder={locationDefaults.postalCode}
+                          defaultValue={locationDefaults.postalCode}
+                          className={`${inputClass} mt-1.5`}
+                        />
+                      </label>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className={labelClass}>
+                        {copy("copy_338de443b2af")}
+                        <span className="text-rose-600 ml-1">{copy("copy_684888c0ebb1")}</span>
+                        <select name="district" required defaultValue="" className={`${inputClass} mt-1.5`}>
+                          <option value={copy("copy_e3b0c44298fc")} disabled>{copy("copy_11aaa5f43d2b")}</option>
+                          {requiredSetting(settingsFor("resident").districts, "resident.districts").map(district => (
+                            <option key={district}>{district}</option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label className={labelClass}>
+                        {copy("copy_04b621f376b3")}
+                        <input
+                          name="city"
+                          required
+                          value={locationDefaults.city}
+                          readOnly
+                          className={`${inputClass} mt-1.5 bg-slate-100 text-slate-500`}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </fieldset>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className={labelClass}>
+                    {copy("copy_68ecf962332c")}
+                    <span className="text-rose-600 ml-1">{copy("copy_684888c0ebb1")}</span>
+                    <input
+                      name="password"
+                      type="password"
+                      required
+                      minLength={8}
+                      autoComplete="new-password"
+                      value={password}
+                      onChange={event => setPassword(event.target.value)}
+                      placeholder={copy("copy_977f3b2676a9")}
+                      className={`${inputClass} mt-1.5`}
+                    />
+                    <small className="mt-1 block text-[11px] font-normal text-slate-500">{copy("copy_aa7e8499fa62")}</small>
+                  </label>
+
+                  <label className={labelClass}>
+                    {copy("copy_b186ebc5096d")}
+                    <span className="text-rose-600 ml-1">{copy("copy_684888c0ebb1")}</span>
+                    <input
+                      name="confirmPassword"
+                      type="password"
+                      required
+                      minLength={8}
+                      autoComplete="new-password"
+                      value={confirmPassword}
+                      onChange={event => setConfirmPassword(event.target.value)}
+                      placeholder={copy("copy_210dfc7e4536")}
+                      className={`${inputClass} mt-1.5`}
+                    />
+                    <div className="mt-1 flex items-center justify-between">
+                      <small className="text-[11px] font-semibold text-slate-600">
+                        {strength ? `Strength: ${strength}` : copy("copy_551df75ec882")}
+                      </small>
+                    </div>
+                    {/* Visual strength meter bar */}
+                    <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
+                      <div
+                        className={`h-full transition-all duration-300 ${
+                          strength === "Strong"
+                            ? "w-full bg-emerald-500"
+                            : strength === "Good"
+                            ? "w-2/3 bg-blue-500"
+                            : strength
+                            ? "w-1/3 bg-amber-500"
+                            : "w-0"
+                        }`}
+                      />
+                    </div>
+                  </label>
+                </div>
+
+                {(error || localError) && (
+                  <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-semibold text-rose-800">
+                    {localError || error}
+                  </p>
+                )}
+
+                <div className="space-y-2 pt-1">
+                  <label className="flex items-start gap-2.5 text-xs text-slate-700 cursor-pointer">
+                    <input name="termsAccepted" type="checkbox" required className="mt-0.5 h-4 w-4 rounded accent-rose-600" />
+                    <span>
+                      {copy("copy_bdb74034a9d2")}
+                      <strong className="text-rose-700 ml-1">{copy("copy_add882140045")}</strong>
+                    </span>
+                  </label>
+
+                  <label className="flex items-start gap-2.5 text-xs text-slate-700 cursor-pointer">
+                    <input name="smsAlerts" type="checkbox" defaultChecked className="mt-0.5 h-4 w-4 rounded accent-rose-600" />
+                    <span>{copy("copy_e2d06d28e9c3")}</span>
+                  </label>
+
+                  <label className="flex items-start gap-2.5 text-xs text-slate-700 cursor-pointer">
+                    <input name="immediateEmailAlerts" type="checkbox" className="mt-0.5 h-4 w-4 rounded accent-rose-600" />
+                    <span>
+                      <strong className="block font-semibold text-slate-900">{copy("immediateEmailAlertsTitle")}</strong>
+                      <span className="text-slate-500 text-[11px]">{copy("immediateEmailAlertsInfo")}</span>
+                    </span>
+                  </label>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="w-full rounded-xl bg-gradient-to-r from-rose-600 to-rose-700 hover:from-rose-700 hover:to-rose-800 py-3.5 px-4 text-xs font-bold uppercase tracking-wider text-white shadow-lg shadow-rose-600/25 transition active:scale-[0.99] disabled:opacity-60"
+                >
+                  {busy ? copy("copy_f2daf61e527b") : copy("copy_582e329beb8d")}
+                </button>
+              </form>
+
+              <p className="mt-4 text-center text-xs text-slate-600">
+                {copy("copy_04a38dd010ed")}
+                <button onClick={() => switchMode("login")} className="font-bold text-rose-700 hover:underline">
+                  {copy("copy_3233beba694b")}
+                </button>
+              </p>
+
+              <p className="mt-3 border-t border-slate-100 pt-3 text-center text-xs text-slate-400">
+                {copy("copy_d66ba85e9208")}
+              </p>
+            </>
+          )}
         </section>
       </div>
     </section>
-    <footer className="resident-auth-footer flex flex-wrap items-center justify-between gap-2 border-t border-[#eee6e3] bg-white px-5 py-3 text-[8px] text-slate-500 sm:px-8"><span><strong className="text-slate-700">{copy("copy_57f90a2f0d6f")}</strong> {copy("copy_2dacfe794ae4")}</span><span>{copy("copy_14d92766bed6")}</span></footer>
+
   </main>;
 }
 
 function App({ portal }: { portal: Portal }) {
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem(`civicalert:${portal}:account`));
+  const [token, setToken] = useState<string | null>(null);
   const [actor, setActor] = useState<Actor | null>(null);
   const [page, setPage] = useState(new URLSearchParams(location.search).get("page") || "overview");
   const [error, setError] = useState("");
@@ -372,6 +703,39 @@ function App({ portal }: { portal: Portal }) {
   const isResident = portal === "resident";
 
   useEffect(() => {
+    let active = true;
+    try {
+      const supabase = getSupabase();
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        if (!active) return;
+        const accessToken = session?.access_token ?? null;
+        setToken(accessToken);
+        if (accessToken) {
+          localStorage.setItem(`civicalert:${portal}:account`, accessToken);
+        } else {
+          localStorage.removeItem(`civicalert:${portal}:account`);
+        }
+      });
+      void supabase.auth.getSession().then(({ data, error: sessionError }) => {
+        if (!active) return;
+        if (sessionError) {
+          setError(sessionError.message);
+          return;
+        }
+        setToken(data.session?.access_token ?? null);
+      }).catch(err => {
+        if (active) setError(err instanceof Error ? err.message : "Could not restore your Supabase session.");
+      });
+      return () => {
+        active = false;
+        subscription.unsubscribe();
+      };
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Supabase is not configured.");
+    }
+  }, [portal]);
+
+  useEffect(() => {
     if (token && actor) void loadWorkspace();
   }, [token, actor, page]);
 
@@ -382,7 +746,7 @@ function App({ portal }: { portal: Portal }) {
       if (active) setActor(response.actor);
     }).catch(err => {
       if (!active) return;
-      localSignOut(portal);
+      void getSupabase().auth.signOut();
       setActor(null);
       setToken(null);
       setError(err instanceof Error ? err.message : copy("copy_fd2a9a955861"));
@@ -529,13 +893,21 @@ function App({ portal }: { portal: Portal }) {
     try {
       const imageDataUrl = await readAnnouncementImage(form.get("announcementImage"));
       const selectedChannels = form.getAll("channels").map(String);
+      if (selectedChannels.length === 0) {
+        throw new Error("Select at least one announcement channel.");
+      }
+      if (selectedChannels.includes("instagram") && !imageDataUrl) {
+        throw new Error("Add an announcement image before selecting Instagram.");
+      }
       const scheduledAtInput = String(form.get("scheduledAt") || "");
       const published = await localAction<{
         id: number;
         scheduledAt: string | null;
+        facebookUrl?: string | null;
+        instagramUrl?: string | null;
         emailDelivery?: EmailDeliverySummary | null;
         socialDelivery?: {
-          platforms: Array<{ platform: string; status: string; message?: string }>;
+          platforms: Array<{ platform: string; status: string; message?: string; permalinkUrl?: string }>;
         } | null;
         smsQueued?: number;
       }>(portal, "/advisories", token, {
@@ -544,6 +916,9 @@ function App({ portal }: { portal: Portal }) {
           title: form.get("title"),
           area: form.get("area"),
           type: form.get("category"),
+          priority: form.get("priority"),
+          serviceStartsAt: form.get("serviceStartsAt") || null,
+          estimatedRestorationAt: form.get("estimatedRestorationAt") || null,
           details: form.get("details"),
           latitude: form.get("latitude") || null,
           longitude: form.get("longitude") || null,
@@ -563,10 +938,10 @@ function App({ portal }: { portal: Portal }) {
         const deliveryResults: string[] = [];
         if (selectedChannels.includes("gmail")) {
           const summary = published.emailDelivery;
-          deliveryResults.push(`Gmail: ${summary?.sent ? `${summary.sent} sent` : summary?.failed ? `${summary.failed} failed` : summary?.status === "no_recipients" ? "no opted-in recipients" : "not sent"}`);
+          deliveryResults.push(`Gmail: ${summary?.sent ? `${summary.sent} sent${summary.failed ? `, ${summary.failed} failed` : ""}` : summary?.failed ? `${summary.failed} failed` : summary?.status === "no_recipients" ? "no opted-in recipients" : "not sent"}`);
         }
         for (const platform of published.socialDelivery?.platforms ?? []) {
-          deliveryResults.push(`${platform.platform}: ${platform.status}${platform.message ? ` (${platform.message})` : ""}`);
+          deliveryResults.push(`${platform.platform}: ${platform.status}${platform.permalinkUrl ? ` — ${platform.permalinkUrl}` : ""}${platform.message ? ` (${platform.message})` : ""}`);
         }
         if (selectedChannels.includes("sms")) {
           deliveryResults.push(published.smsQueued
@@ -602,7 +977,7 @@ function App({ portal }: { portal: Portal }) {
   }
 
   async function updateReportStatus(item: ServiceReport) {
-    if (portal !== "water" || !token) return;
+    if (!token) return;
     const nextStatus: Status = item.status === "Received" ? "Under investigation" : item.status === "Under investigation" ? "Crew dispatched" : item.status === "Crew dispatched" ? "Resolved" : "Received";
     setError(copy("copy_e3b0c44298fc"));
     try {
@@ -678,7 +1053,8 @@ function App({ portal }: { portal: Portal }) {
   }
 
   function signOut() {
-    localSignOut(portal);
+    void getSupabase().auth.signOut();
+    localStorage.removeItem(`civicalert:${portal}:account`);
     setActor(null); setToken(null); setItems({ advisories: [], workOrders: [], reports: [], network: [] });
     history.replaceState({}, "", `/?portal=${portal}`);
   }
@@ -718,13 +1094,13 @@ function App({ portal }: { portal: Portal }) {
           {publishedDelivery.summary.failed > 0 && <button type="button" onClick={() => void retryFailedEmails()} disabled={retryingEmail} className="rounded-md border border-current px-3 py-2 text-xs font-semibold disabled:opacity-60">{retryingEmail ? "Retrying…" : "Retry failed email(s)"}</button>}
         </div>}
         {loading && <div className="mb-4 h-1 overflow-hidden rounded-full bg-slate-200"><div className="h-full w-1/3 animate-pulse bg-[var(--brand)]" /></div>}
-        {page === "overview" ? <Overview portal={portal} actor={actor} advisories={activeAdvisories} workOrders={items.workOrders} reports={items.reports} network={items.network} onNavigate={navigate} onAction={kind => kind === "advisory" && !isResident ? navigate("publish") : setModal(kind)} /> : page === "inbox" ? <VirtualInbox messages={inbox} onRead={async message => { await localAction(portal, `/inbox/${message.id}/read`, token, { method: "PATCH" }); await loadWorkspace(); }} /> : page === "profile" && isResident ? <ResidentProfile actor={actor} selectedImage={profileImage} saving={busy} onImageChange={setProfileImage} onSave={saveProfile} onPasswordChange={updatePassword} /> : page === "advisories" && isResident ? <ResidentAdvisories items={items.advisories} workOrders={items.workOrders} /> : (portal === "cepalco" || portal === "water") && page === "publish" ? <AnnouncementComposer portal={portal} busy={busy} onCancel={() => navigate("overview")} onSubmit={publishAnnouncement} /> : portal === "cepalco" && page === "incidents" ? <CepalcoDisruptions items={advisories} onPublish={() => navigate("publish")} onStatusUpdate={updateAdvisoryStatus} /> : portal === "cepalco" && page === "scheduled" ? <CepalcoSchedule workOrders={items.workOrders} onCreate={() => setModal("work")} onPublish={() => navigate("publish")} /> : portal === "water" && page === "incidents" ? <WaterAdvisories items={items.advisories} onPublish={() => navigate("publish")} /> : portal === "water" && page === "residents" ? <WaterReports reports={items.reports} onStatusUpdate={updateReportStatus} /> : portal === "water" && page === "scheduled" ? <WaterSchedule items={items.workOrders} onCreate={() => setModal("work")} /> : portal === "cepalco" && page === "restoration" ? <CepalcoRestorationMap advisories={advisories} /> : page === "restoration" ? <Network portal={portal} advisories={advisories} network={items.network} /> : page === "services" ? <Services advisories={items.advisories} /> : <section className="space-y-4">
+        {page === "overview" ? <Overview portal={portal} actor={actor} advisories={activeAdvisories} workOrders={items.workOrders} reports={items.reports} network={items.network} onNavigate={navigate} onAction={kind => kind === "advisory" && !isResident ? navigate("publish") : setModal(kind)} /> : page === "inbox" ? <VirtualInbox messages={inbox} onRead={async message => { await localAction(portal, `/inbox/${message.id}/read`, token, { method: "PATCH" }); await loadWorkspace(); }} /> : page === "profile" && isResident ? <ResidentProfile actor={actor} selectedImage={profileImage} saving={busy} onImageChange={setProfileImage} onSave={saveProfile} onPasswordChange={updatePassword} /> : page === "advisories" && isResident ? <ResidentAdvisories items={items.advisories} workOrders={items.workOrders} /> : (portal === "cepalco" || portal === "water") && page === "publish" ? portal === "water" ? <WaterPublishForm busy={busy} token={token} onCancel={() => navigate("overview")} onSubmit={publishAnnouncement} /> : <AnnouncementComposer portal={portal} busy={busy} token={token} onCancel={() => navigate("overview")} onSubmit={publishAnnouncement} /> : portal === "cepalco" && page === "incidents" ? <CepalcoDisruptions items={advisories} onPublish={() => navigate("publish")} onStatusUpdate={updateAdvisoryStatus} /> : portal === "cepalco" && page === "scheduled" ? <CepalcoSchedule workOrders={items.workOrders} onCreate={() => setModal("work")} onPublish={() => navigate("publish")} /> : portal === "water" && page === "incidents" ? <WaterAdvisories items={items.advisories} onPublish={() => navigate("publish")} /> : (portal === "water" || portal === "cepalco") && page === "residents" ? <WaterReports reports={items.reports} onStatusUpdate={updateReportStatus} /> : portal === "water" && page === "scheduled" ? <WaterSchedule items={items.workOrders} onCreate={() => setModal("work")} /> : portal === "cepalco" && page === "restoration" ? <CepalcoRestorationMap advisories={advisories} /> : page === "restoration" ? <Network portal={portal} advisories={advisories} network={items.network} /> : page === "services" ? <Services advisories={items.advisories} /> : <section className="space-y-4">
           {page === "incidents" && <div className="flex flex-wrap items-center justify-between gap-3"><label className="flex min-w-[230px] flex-1 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-slate-400"><Icon name="search" className="h-4 w-4" /><input className="w-full border-0 bg-transparent text-xs text-slate-800 outline-none" placeholder={copy("copy_7145ac5f783f")} onChange={event => document.querySelectorAll<HTMLElement>("[data-search-item]").forEach(card => { card.hidden = !card.innerText.toLowerCase().includes(event.target.value.toLowerCase()); })} /></label>{!isResident && <button onClick={() => setModal("advisory")} className="rounded-lg bg-[var(--brand)] px-4 py-2.5 text-xs font-bold text-white">{copy("copy_dd425feef83c")}{newButton}</button>}</div>}
           <div className="grid gap-3 xl:grid-cols-2">{sectionItems.map(item => <DataCard key={item.id} item={item} page={page} />)}{sectionItems.length === 0 && <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500">{copy("copy_9b2835326f52")}</div>}</div>
         </section>}
       </section>
     </div>
-    {toast && <div role="status" className="fixed bottom-5 right-5 z-40 rounded-lg bg-emerald-900 px-4 py-3 text-sm font-medium text-white shadow-xl">{toast}</div>}
+    {toast && <div role={toast.startsWith("Announcement saved.") && /failed|not_configured|no opted-in|no text was sent|not sent/i.test(toast) ? "alert" : "status"} className={`fixed bottom-5 right-5 z-40 rounded-lg px-4 py-3 text-sm font-medium text-white shadow-xl ${toast.startsWith("Announcement saved.") && /failed|not_configured|no opted-in|no text was sent|not sent/i.test(toast) ? "bg-amber-800" : "bg-emerald-900"}`}>{toast}</div>}
     {modal && <RecordModal portal={portal} kind={modal} onClose={() => setModal(null)} onSubmit={submitRecord} />}
   </main>;
 }
@@ -841,7 +1217,7 @@ function advisoryPublishMessage(
 }
 
 function GmailConnection({ portal, token }: { portal: "cepalco" | "water"; token: string | null }) {
-  const [connection, setConnection] = useState<{ connected: boolean; senderEmail: string | null } | null>(null);
+  const [connection, setConnection] = useState<{ connected: boolean; senderEmail: string | null; connectionError?: string | null } | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -882,9 +1258,31 @@ function GmailConnection({ portal, token }: { portal: "cepalco" | "water"; token
           </button>}
     </div>
     {connection?.connected && <button type="button" onClick={() => void connect()} disabled={busy || !token} className="mt-2 rounded-md border border-slate-200 px-3 py-2 text-[8px] font-semibold text-slate-700 disabled:opacity-60">{busy ? copy("gmailConnecting") : copy("gmailReconnect")}</button>}
-    {!connection?.connected && !error && <p className="mb-0 mt-2 text-[8px] text-slate-500">{connection ? copy("gmailNotConnected") : "Checking Gmail connection…"}</p>}
+    {!connection?.connected && !error && <p className="mb-0 mt-2 text-[8px] text-slate-500">{connection?.connectionError || (connection ? copy("gmailNotConnected") : "Checking Gmail connection…")}</p>}
     {error && <p role="alert" className="mb-0 mt-2 text-[8px] text-rose-700">{error}</p>}
   </div>;
+}
+
+function SocialConnectionStatus({ portal, token }: { portal: "cepalco" | "water"; token: string | null }) {
+  const [status, setStatus] = useState<{ facebook: boolean; instagram: boolean } | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!token) return;
+    let active = true;
+    void localAction<{ facebook: boolean; instagram: boolean }>(portal, "/social/status", token)
+      .then(result => { if (active) setStatus(result); })
+      .catch(err => { if (active) setError(err instanceof Error ? err.message : "Could not check social publishing setup."); });
+    return () => { active = false; };
+  }, [portal, token]);
+
+  if (error) return <p role="alert" className="mb-0 text-xs text-rose-700">{error}</p>;
+  if (!status) return <p className="mb-0 text-xs text-slate-500">Checking social publishing setup…</p>;
+  return <p className="mb-0 text-xs text-slate-600">
+    Facebook: <strong className={status.facebook ? "text-emerald-700" : "text-amber-700"}>{status.facebook ? "connected" : "server setup required"}</strong>
+    {" · "}
+    Instagram: <strong className={status.instagram ? "text-emerald-700" : "text-amber-700"}>{status.instagram ? "connected" : "server setup required"}</strong>
+  </p>;
 }
 
 function Overview({ portal, actor, advisories, workOrders, reports, network, onNavigate, onAction }: { portal: Portal; actor: Actor; advisories: Advisory[]; workOrders: WorkOrder[]; reports: ServiceReport[]; network: NetworkReading[]; onNavigate: (page: string) => void; onAction: (modal: "advisory" | "work") => void }) {
@@ -980,6 +1378,7 @@ function CepalcoIncidentCard({ item, compact = false, onStatusUpdate }: { item: 
     <p className="mb-2 text-[8px] text-slate-500">{item.reference} {copy("copy_71e8c6df1273")}{item.area}</p>
     {imageUrl ? <img src={imageUrl} alt={`Announcement: ${item.title}`} className="my-2 block max-h-56 w-full rounded-lg object-cover" /> : <div className="cepalco-scene" role="img" aria-label={copy("copy_71df1e7e4841")}><span className="scene-cloud" /><span className="scene-pole" /><span className="scene-wire wire-one" /><span className="scene-wire wire-two" /><span className="scene-bucket" /><span className="scene-worker worker-one" /><span className="scene-worker worker-two" /><span className="scene-road" /><span className="scene-caption">{copy("copy_806a713aa5b3")}</span></div>}
     <p className="mb-2 mt-2 text-[8px] leading-4 text-slate-600"><strong className="text-teal-800">{copy("copy_3f1e0db044b6")}</strong> {item.details}</p>
+    <SocialPostLinks item={item} />
     {!compact && <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-2 text-[8px] text-slate-500"><span>{copy("copy_401411b3e7cd")}</span><span>{copy("copy_2d32246bb801")}</span><div className="flex gap-2"><button onClick={() => setDetailsOpen(!detailsOpen)} className="font-bold text-teal-800">{detailsOpen ? copy("copy_c9722a7a962a") : copy("copy_a6fee21d1c59")}</button>{onStatusUpdate && item.publicationStatus !== "scheduled" && item.publicationStatus !== "failed" && <button onClick={() => onStatusUpdate(item)} className="rounded border border-slate-200 px-2 py-1 font-semibold text-slate-700">{copy("copy_1e6bf669df09")}</button>}</div></div>}
     {detailsOpen && <p className="mb-0 mt-2 rounded bg-slate-50 p-2 text-[8px] text-slate-600">{copy("copy_f32ba55bfcd0")}{item.reference}{copy("copy_9f15c67f4e0c")}{item.status}{copy("copy_cdb4ee2aea69")}</p>}
   </article>;
@@ -996,14 +1395,29 @@ function CepalcoDisruptions({ items, onPublish, onStatusUpdate }: { items: Advis
   </section>;
 }
 
-function AnnouncementComposer({
+function AnnouncementComposer(props: {
+  portal: "cepalco" | "water";
+  busy: boolean;
+  token: string | null;
+  onCancel: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  if (props.portal === "cepalco") {
+    return <CepalcoPublishForm busy={props.busy} token={props.token} onCancel={props.onCancel} onSubmit={props.onSubmit} />;
+  }
+  return <GenericAnnouncementComposer {...props} />;
+}
+
+function GenericAnnouncementComposer({
   portal,
   busy,
+  token,
   onCancel,
   onSubmit,
 }: {
   portal: "cepalco" | "water";
   busy: boolean;
+  token: string | null;
   onCancel: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
@@ -1063,7 +1477,7 @@ function AnnouncementComposer({
           <span><strong className="block text-slate-800">{title}</strong><small className="mt-1 block text-slate-500">{description}</small></span>
         </label>)}
       </div>
-      <GmailConnection portal={portal} token={localStorage.getItem(`civicalert:${portal}:account`)} />
+      <GmailConnection portal={portal} token={token} />
     </section>
     <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-5">
       <h3 className="m-0 text-sm font-bold text-slate-900">Publishing time</h3>
@@ -1088,44 +1502,121 @@ function minimumLocalDateTime(): string {
   return date.toISOString().slice(0, 16);
 }
 
-function CepalcoPublishForm({ busy, onCancel, onSubmit }: { busy: boolean; onCancel: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+function CepalcoPublishForm({ busy, token, onCancel, onSubmit }: { busy: boolean; token: string | null; onCancel: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
   const categories = requiredSetting(settingsFor("cepalco").categories, "cepalco.categories");
   const priorities = requiredSetting(settingsFor("cepalco").priorities, "cepalco.priorities");
-  const [category, setCategory] = useState(categories[0]?.value || "");
-  // ADDED: Holds the point staff select on Google Maps until the advisory is submitted.
+  const [category, setCategory] = useState(() => readPortalDraftValue("cepalco", "category") || categories[0]?.value || "");
   const [selectedLocation, setSelectedLocation] = useState<CivicAlertMapLocation | null>(null);
+  const [channels, setChannels] = useState(() => {
+    const draft = readPortalDraftChannels("cepalco");
+    return draft.length > 0 ? draft : ["sms", "gmail"];
+  });
+  const [schedule, setSchedule] = useState(() => readPortalDraftValue("cepalco", "schedule") === "true");
+  const [draftSaved, setDraftSaved] = useState(false);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [detailsLength, setDetailsLength] = useState(() => readPortalDraftValue("cepalco", "details").length);
+  useEffect(() => {
+    if (!imagePreview) return;
+    return () => URL.revokeObjectURL(imagePreview);
+  }, [imagePreview]);
+  function saveDraft(form: HTMLFormElement | null) {
+    if (!form) return;
+    new FormData(form).forEach((value, name) => {
+      if (value instanceof File || name === "channels") return;
+      localStorage.setItem(`civicalert:cepalco:draft:${name}`, String(value));
+    });
+    localStorage.setItem("civicalert:cepalco:draft:category", category);
+    localStorage.setItem("civicalert:cepalco:draft:schedule", String(schedule));
+    localStorage.setItem("civicalert:cepalco:draft:channels", channels.join("|"));
+    setDraftSaved(true);
+  }
+  function toggleChannel(channel: string) {
+    setChannels(current => current.includes(channel)
+      ? current.filter(value => value !== channel)
+      : [...current, channel]);
+    setDraftSaved(false);
+  }
   return <form className="cepalco-publish-layout" onSubmit={onSubmit}>
     <div className="space-y-3">
-      <section className="cepalco-form-card"><h2>{copy("copy_18bac6177a05")}</h2><p>{copy("copy_e8561176d153")}</p><div className="cepalco-category-grid">{categories.map(({ value, description, icon }) => <button key={value} type="button" onClick={() => setCategory(value)} className={`cepalco-category ${category === value ? "selected" : ""}`}><span>{icon}</span><strong>{value}</strong><small>{description}</small></button>)}</div><input type="hidden" name="category" value={category} /><label className="cepalco-field">{copy("copy_d60dbba07922")}<select name="priority" defaultValue="High">{priorities.map(priority => <option key={priority}>{priority}</option>)}</select></label></section>
-      <section className="cepalco-form-card"><h2>{copy("copy_b62f2612f787")}</h2><p>{copy("copy_c6ad5ac6825a")}</p><label className="cepalco-field">{copy("copy_fe6476826a3a")}<input name="title" required maxLength={160} placeholder={copy("copy_fe44d4af9f10")} /></label><div className="grid gap-3 sm:grid-cols-2"><label className="cepalco-field">{copy("copy_3c84d9e85737")}<input name="area" required maxLength={160} placeholder={copy("copy_5a2f832484db")} /></label><label className="cepalco-field">{copy("copy_8e1999f8fbd0")}<input name="restoration" placeholder={copy("copy_506474840ce4")} /></label></div></section>
-      <section className="cepalco-form-card"><h2>{copy("copy_138aed10d89c")}</h2><p>{copy("copy_e185343127fd")}</p><label className="cepalco-field">{copy("copy_e7e6d38f2c23")}<textarea name="details" required rows={5} maxLength={1800} placeholder={copy("copy_4c3a394380e5")} /></label><div className="cepalco-form-note">{copy("copy_9f395debef45")}</div></section>
-      {/* ADDED: Interactive Google Map location picker for new CEPALCO advisories. */}
       <section className="cepalco-form-card">
-        <h2>5. Affected location on Google Maps</h2>
-        <p>Click the map to place a pin at the affected location. This selection is optional.</p>
+        <span className="cepalco-kicker">CEPALCO OPERATIONS / PUBLIC NOTICES</span>
+        <h2>Publish service advisory</h2>
+        <p>Write a clear service update, choose who receives it, then publish or schedule it.</p>
+        <div className="cepalco-category-grid">{categories.map(({ value, description, icon }) => <button key={value} type="button" aria-pressed={category === value} onClick={() => { setCategory(value); setDraftSaved(false); }} className={`cepalco-category ${category === value ? "selected" : ""}`}><span>{icon}</span><strong>{value}</strong><small>{description}</small></button>)}</div>
+        <input type="hidden" name="category" value={category} />
+        <label className="cepalco-field">Priority / severity<select name="priority" defaultValue={readPortalDraftValue("cepalco", "priority") || "High"} onChange={() => setDraftSaved(false)}>{priorities.map(priority => <option key={priority}>{priority}</option>)}</select></label>
+      </section>
+      <section className="cepalco-form-card">
+        <h2>Headline and affected service area</h2>
+        <p>Identify the issue and the neighborhoods or zones that may be affected.</p>
+        <label className="cepalco-field">Advisory headline<input name="title" required maxLength={160} defaultValue={readPortalDraftValue("cepalco", "title")} placeholder="Summarize the service update" onChange={() => setDraftSaved(false)} /></label>
+        <label className="cepalco-field">Affected zone or district<input name="area" required maxLength={160} defaultValue={readPortalDraftValue("cepalco", "area")} placeholder="District, barangay, or service area" onChange={() => setDraftSaved(false)} /></label>
+      </section>
+      <section className="cepalco-form-card">
+        <h2>Service window</h2>
+        <p>Add the expected start and restoration time when known.</p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="cepalco-field">Advisory start<input name="serviceStartsAt" type="datetime-local" defaultValue={readPortalDraftValue("cepalco", "serviceStartsAt")} onChange={() => setDraftSaved(false)} /></label>
+          <label className="cepalco-field">Estimated restoration<input name="estimatedRestorationAt" type="datetime-local" defaultValue={readPortalDraftValue("cepalco", "estimatedRestorationAt")} onChange={() => setDraftSaved(false)} /></label>
+        </div>
+      </section>
+      <section className="cepalco-form-card">
+        <div className="flex items-start justify-between gap-2"><div><h2>Public notice and safety guidance</h2><p>Describe the impact and any steps residents should take.</p></div><small>{detailsLength} / 1800</small></div>
+        <label className="cepalco-field">Advisory details<textarea name="details" required rows={6} maxLength={1800} defaultValue={readPortalDraftValue("cepalco", "details")} placeholder="Explain what happened, who is affected, and any safety guidance." onChange={event => { setDetailsLength(event.target.value.length); setDraftSaved(false); }} /></label>
+      </section>
+      <section className="cepalco-form-card">
+        <h2>Affected location</h2>
+        <p>Optionally add a point on the map for residents to locate the advisory.</p>
         <input type="hidden" name="latitude" value={selectedLocation?.latitude ?? ""} />
         <input type="hidden" name="longitude" value={selectedLocation?.longitude ?? ""} />
-        <GoogleMap mode="picker" height={270} label="Click the map to select a location" onLocationSelected={setSelectedLocation} />
-        <p className="mb-0 mt-2 text-xs text-slate-600">{selectedLocation ? `Selected coordinates: ${selectedLocation.latitude.toFixed(6)}, ${selectedLocation.longitude.toFixed(6)}. Click again to move the pin.` : "No point selected yet. Add a pin to make this announcement appear on the map."}</p>
+        <GoogleMap mode="picker" height={230} label="Select affected service location" onLocationSelected={setSelectedLocation} />
+        <p className="mb-0 mt-2 text-xs text-slate-600">{selectedLocation ? `Selected point: ${selectedLocation.latitude.toFixed(5)}, ${selectedLocation.longitude.toFixed(5)}` : "No map point selected. The advisory can still be published without one."}</p>
       </section>
-      <section className="cepalco-form-card"><h2>6. {copy("copy_42e399a0716f")}</h2><p>{copy("copy_214a86420728")}</p><label className="cepalco-channel"><input type="checkbox" checked readOnly /><span><strong>{copy("copy_6775a7e3a95d")}</strong><small>{copy("copy_eec3c07d60d4")}</small></span><span className="cepalco-pill good">{copy("copy_92340695899b")}</span></label><div className="cepalco-channel disabled"><input type="checkbox" disabled /><span><strong>{copy("copy_47a9cef76271")}</strong><small>{copy("copy_ba137e5dbadd")}</small></span><span className="cepalco-pill">{copy("copy_ca1844969742")}</span></div><GmailConnection portal="cepalco" token={localStorage.getItem("civicalert:cepalco:account")} /></section>
-      <section className="cepalco-form-card"><h2>6. {copy("copy_5a830f9b317e")}</h2><p>{copy("copy_b0bb9ebf65ac")}</p>{/* ADDED: Replace the prototype upload placeholder with a working image picker. */}
-        <div className="cepalco-upload">
-          <label className="block text-xs font-semibold text-slate-700">
-            Announcement image (optional)
-            <input
-              type="file"
-              name="announcementImage"
-              accept="image/jpeg,image/png,image/webp"
-              className="mt-2 block w-full text-xs font-normal"
-            />
-          </label>
-          <small>Choose a JPEG, PNG, or WebP image. Maximum file size: 1 MB. It will be attached to Gmail notifications.</small>
-        </div></section>
-      <div className="flex flex-wrap justify-end gap-2"><button type="button" className="cepalco-secondary" onClick={onCancel}>{copy("copy_19766ed6ccb2")}</button><button type="submit" disabled={busy} className="cepalco-primary">{busy ? copy("copy_582e0f1abad4") : copy("copy_6f2587fed592")}</button></div>
+      <section className="cepalco-form-card">
+        <h2>Notice image (optional)</h2>
+        <p>Add a photo to the advisory. Instagram publishing needs an image.</p>
+        <label className="cepalco-field">Image file<input type="file" name="announcementImage" accept="image/jpeg,image/png,image/webp" onChange={event => { const file = event.target.files?.[0]; setImagePreview(file ? URL.createObjectURL(file) : null); setDraftSaved(false); }} /><small>JPEG, PNG, or WebP, up to 15 MB. Oversized images are optimized to fit the publishing limit.</small></label>
+        {imagePreview && <img src={imagePreview} alt="Selected advisory image preview" className="cepalco-announcement-preview" />}
+      </section>
+      <section className="cepalco-form-card">
+        <h2>Distribution channels</h2>
+        <p>Select one or more channels. External accounts must be configured on the CEPALCO API.</p>
+        {([
+          ["gmail", "Gmail", "Email residents who opted in to immediate advisory email."],
+          ["facebook", "Facebook", "Post the update to the connected CEPALCO page."],
+          ["instagram", "Instagram", "Publish an image and caption to the connected account."],
+          ["sms", "Resident inbox alert", "Create simulated inbox alerts; no text messages are sent."],
+        ] as const).map(([value, title, description]) => <label className="cepalco-channel" key={value}>
+          <input type="checkbox" name="channels" value={value} checked={channels.includes(value)} onChange={() => toggleChannel(value)} />
+          <span><strong>{title}</strong><small>{description}</small></span>
+        </label>)}
+        <SocialConnectionStatus portal="cepalco" token={token} />
+        <GmailConnection portal="cepalco" token={token} />
+      </section>
+      <section className="cepalco-form-card">
+        <h2>Publishing time</h2>
+        <label className="cepalco-channel"><input type="checkbox" checked={schedule} onChange={event => { setSchedule(event.target.checked); setDraftSaved(false); }} /><span><strong>Schedule this advisory</strong><small>Leave unchecked to publish as soon as you submit.</small></span></label>
+        {schedule && <label className="cepalco-field">Publish date and time<input name="scheduledAt" type="datetime-local" required min={minimumLocalDateTime()} defaultValue={readPortalDraftValue("cepalco", "scheduledAt")} onChange={() => setDraftSaved(false)} /></label>}
+        {!schedule && <input type="hidden" name="scheduledAt" value="" />}
+      </section>
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {draftSaved && <span role="status" className="mr-auto text-xs font-semibold text-teal-800">Draft saved in this browser.</span>}
+        <button type="button" className="cepalco-secondary" onClick={onCancel}>Cancel</button>
+        <button type="button" className="cepalco-secondary" onClick={event => saveDraft(event.currentTarget.form)}>Save draft</button>
+        <button type="submit" disabled={busy} className="cepalco-primary">{busy ? "Publishing…" : schedule ? "Schedule advisory" : "Publish advisory"}</button>
+      </div>
     </div>
-    <aside className="space-y-3"><div className="cepalco-form-card"><span className="cepalco-kicker">{copy("copy_88f75d3e34fd")}</span><h3>{category}</h3><p className="text-[9px] text-slate-500">{copy("copy_6a90df4a57cd")}</p><div className="cepalco-scene"><span className="scene-cloud" /><span className="scene-pole" /><span className="scene-wire wire-one" /><span className="scene-wire wire-two" /><span className="scene-bucket" /><span className="scene-worker worker-one" /><span className="scene-worker worker-two" /><span className="scene-road" /></div><p className="mb-0 mt-2 text-[8px] text-slate-500">{copy("copy_52572aed2377")}</p></div><div className="cepalco-form-card"><h2>{copy("copy_af6c41b06fec")}</h2><ul className="cepalco-checklist"><li>{copy("copy_801a3ef3df85")}</li><li>{copy("copy_20c06589328a")}</li><li>{copy("copy_d583e7f68646")}</li></ul></div></aside>
+    <aside className="space-y-3"><div className="cepalco-form-card"><span className="cepalco-kicker">{copy("copy_88f75d3e34fd")}</span><h3>{category}</h3><p className="text-[9px] text-slate-500">The selected service category will identify the advisory in utility and resident feeds.</p><div className="cepalco-scene"><span className="scene-cloud" /><span className="scene-pole" /><span className="scene-wire wire-one" /><span className="scene-wire wire-two" /><span className="scene-bucket" /><span className="scene-worker worker-one" /><span className="scene-worker worker-two" /><span className="scene-road" /></div><p className="mb-0 mt-2 text-[8px] text-slate-500">Review the affected area and message before publishing.</p></div><div className="cepalco-form-card"><h2>Before publishing</h2><ul className="cepalco-checklist"><li>Confirm the affected location.</li><li>Include any known start or restoration time.</li><li>Choose only channels ready to receive this notice.</li></ul></div></aside>
   </form>;
+}
+
+function readPortalDraftValue(portal: "cepalco" | "water", name: string) {
+  return localStorage.getItem(`civicalert:${portal}:draft:${name}`) || "";
+}
+
+function readPortalDraftChannels(portal: "cepalco" | "water"): string[] {
+  return readPortalDraftValue(portal, "channels").split("|")
+    .filter(channel => ["gmail", "facebook", "instagram", "sms"].includes(channel));
 }
 
 function CepalcoMiniMap() {
@@ -1282,8 +1773,19 @@ function ResidentAdvisoryCard({ item, compact = false }: { item: Advisory; compa
     <div className="flex items-center justify-between gap-2 px-3 pt-3"><span className={`rounded-full px-2 py-1 text-[8px] font-bold ${statusTone}`}>{item.status}</span><span className="text-[8px] text-slate-400">{dateLabel}</span></div>
     <div className="px-3 pt-2"><p className="mb-1 text-[8px] font-semibold text-slate-500">{item.utility} {copy("copy_6e01f78b9eb4")}{item.type}</p><h3 className="m-0 text-xs font-bold leading-5 text-slate-900">{item.title}</h3><p className="mb-2 mt-1 text-[8px] text-slate-500">{item.reference} {copy("copy_6e01f78b9eb4")}{item.area}</p></div>
     {imageUrl ? <img src={imageUrl} alt={`Announcement: ${item.title}`} className="block max-h-56 w-full object-cover" /> : compact && <div className={`resident-advisory-visual ${water ? "water" : "power"} compact`} role="img" aria-label={`${water ? "Water utility" : "Electric utility"} service update illustration`}><span className="visual-sun" /><span className="visual-hill visual-hill-back" /><span className="visual-hill visual-hill-front" /><span className="visual-grid-line" /><span className="visual-scene-label">{water ? copy("copy_004a5691e71d") : copy("copy_e910d7acceb6")}</span></div>}
-    <div className="px-3 pb-3 pt-2"><p className="mb-2 text-[8px] leading-4 text-slate-600">{item.details}</p><div className="flex items-center justify-between gap-2 border-t border-slate-100 pt-2 text-[8px]"><span className="font-semibold text-slate-600">{copy("copy_e0f3fde9df0e")}{item.utility}</span><span className="font-bold text-[var(--brand)]">{item.status === "Resolved" ? copy("copy_5ec2be90fc02") : item.status === "Crew dispatched" ? "Crew responding" : "Ongoing check"}</span></div></div>
+    <div className="px-3 pb-3 pt-2"><p className="mb-2 text-[8px] leading-4 text-slate-600">{item.details}</p>{water && (item.serviceStartsAt || item.estimatedRestorationAt) && <p className="mb-2 text-[8px] leading-4 text-slate-600">{item.serviceStartsAt && <>Service begins {formatResidentDateTime(item.serviceStartsAt)}</>}{item.serviceStartsAt && item.estimatedRestorationAt && " · "}{item.estimatedRestorationAt && <>Estimated restoration {formatResidentDateTime(item.estimatedRestorationAt)}</>}</p>}<SocialPostLinks item={item} /><div className="flex items-center justify-between gap-2 border-t border-slate-100 pt-2 text-[8px]"><span className="font-semibold text-slate-600">{copy("copy_e0f3fde9df0e")}{item.utility}</span><span className="font-bold text-[var(--brand)]">{item.status === "Resolved" ? copy("copy_5ec2be90fc02") : item.status === "Crew dispatched" ? "Crew responding" : "Ongoing check"}</span></div></div>
   </article>;
+}
+
+function SocialPostLinks({ item }: { item: Advisory }) {
+  const links = [
+    ["Facebook", item.facebookUrl],
+    ["Instagram", item.instagramUrl],
+  ].filter((entry): entry is [string, string] => Boolean(entry[1]) && entry[1]!.startsWith("https://"));
+  if (!links.length) return null;
+  return <nav aria-label="Social media posts" className="mb-2 flex flex-wrap gap-x-3 gap-y-1 text-[8px] font-semibold">
+    {links.map(([label, url]) => <a key={label} href={url} target="_blank" rel="noreferrer" className="text-[var(--brand)] underline">{`View ${label} post`}</a>)}
+  </nav>;
 }
 
 function HealthLine({ icon, label, value }: { icon: string; label: string; value: string }) {
@@ -1353,13 +1855,15 @@ function WaterAdvisoryCard({ item }: { item: Advisory }) {
   const resolved = item.status === "Resolved";
   const imageUrl = announcementImageUrl(item, "water");
   return <article className={`water-advisory-card ${resolved ? "resolved" : "investigating"}`}>
-    <div className="water-card-meta"><span className={`water-status ${resolved ? "resolved" : "investigating"}`}>{item.publicationStatus === "scheduled" ? "Scheduled" : item.publicationStatus === "failed" ? "Publishing failed" : item.status}</span><time>{formatResidentDateTime(item.scheduledAt || item.createdAt)}</time></div>
+    <div className="water-card-meta"><span className={`water-status ${resolved ? "resolved" : "investigating"}`}>{item.publicationStatus === "scheduled" ? "Scheduled" : item.publicationStatus === "failed" ? "Publishing failed" : item.status}</span><span className="water-priority">{item.priority || "Normal"} priority</span><time>{formatResidentDateTime(item.scheduledAt || item.createdAt)}</time></div>
     <h2>{item.title}</h2>
     <p className="water-card-ref">{item.reference} {copy("copy_6e01f78b9eb4")}{item.area}</p>
     {imageUrl && <img src={imageUrl} alt={`Announcement: ${item.title}`} className="mb-3 block max-h-56 w-full rounded-lg object-cover" />}
+    {(item.serviceStartsAt || item.estimatedRestorationAt) && <p className="water-card-window">{item.serviceStartsAt && <>Service begins {formatResidentDateTime(item.serviceStartsAt)}</>}{item.serviceStartsAt && item.estimatedRestorationAt && " · "}{item.estimatedRestorationAt && <>Estimated restoration {formatResidentDateTime(item.estimatedRestorationAt)}</>}</p>}
     <p className="water-card-copy">{copy("copy_617e0ed75f3b")}{item.details}</p>
+    <SocialPostLinks item={item} />
     <button type="button" onClick={() => setExpanded(!expanded)}>{expanded ? copy("copy_e0ea6e4875f8") : copy("copy_774a3a596063")}</button>
-    {expanded && <p className="water-card-detail"><strong>{item.type}</strong><br />{item.details}</p>}
+    {expanded && <p className="water-card-detail"><strong>{item.type}</strong>{item.priority && <> · {item.priority} priority</>}<br />{item.details}</p>}
   </article>;
 }
 
@@ -1395,60 +1899,106 @@ function WaterSchedule({ items, onCreate }: { items: WorkOrder[]; onCreate: () =
   </section>;
 }
 
-function WaterPublishForm({ busy, onCancel, onSubmit }: { busy: boolean; onCancel: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+function WaterPublishForm({ busy, token, onCancel, onSubmit }: { busy: boolean; token: string | null; onCancel: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
   const categories = requiredSetting(settingsFor("water").categories, "water.categories");
   const priorities = requiredSetting(settingsFor("water").priorities, "water.priorities");
   const [category, setCategory] = useState(() => readWaterDraftValue("category") || categories[0]?.value || "");
   const [draftSaved, setDraftSaved] = useState(false);
-  // ADDED: Holds the point staff select on Google Maps until the advisory is submitted.
   const [selectedLocation, setSelectedLocation] = useState<CivicAlertMapLocation | null>(null);
+  const [channels, setChannels] = useState<string[]>(readWaterDraftChannels);
+  const [schedule, setSchedule] = useState(() => readWaterDraftValue("schedule") === "true");
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [detailsLength, setDetailsLength] = useState(() => readWaterDraftValue("details").length);
+  useEffect(() => {
+    if (!imagePreview) return;
+    return () => URL.revokeObjectURL(imagePreview);
+  }, [imagePreview]);
   const saveDraft = (form: HTMLFormElement | null) => {
     if (!form) return;
-    // UPDATED: Do not store File objects as text in localStorage drafts.
     new FormData(form).forEach((value, name) => {
-      if (value instanceof File) return;
+      if (value instanceof File || name === "channels") return;
       localStorage.setItem(`civicalert:water:draft:${name}`, String(value));
     });
     localStorage.setItem("civicalert:water:draft:category", category);
+    localStorage.setItem("civicalert:water:draft:schedule", String(schedule));
+    localStorage.setItem("civicalert:water:draft:channels", channels.join("|"));
     setDraftSaved(true);
   };
+  const toggleChannel = (channel: string) => {
+    setChannels(current => current.includes(channel)
+      ? current.filter(value => value !== channel)
+      : [...current, channel]);
+    setDraftSaved(false);
+  };
   return <form className="water-page water-publish-form" onSubmit={onSubmit}>
-    <div className="water-publish-top"><div><span>{copy("copy_54dc50734156")}</span><h2>{copy("copy_8620dbe91402")}</h2></div><div><button type="button" onClick={onCancel}>{copy("copy_19766ed6ccb2")}</button><button type="button" onClick={event => saveDraft(event.currentTarget.form)}>{copy("copy_3de100106dd4")}</button><button type="submit" className="water-primary" disabled={busy}>{busy ? copy("copy_582e0f1abad4") : copy("copy_dd50674cdddd")}</button></div></div>
-    <section className="water-form-card"><h3>{copy("copy_9ae3d18007f5")}</h3><p>{copy("copy_614691dc2b74")}</p><div className="water-category-grid">{categories.map(({ value, description }) => <button type="button" className={category === value ? "selected" : ""} key={value} onClick={() => { setCategory(value); setDraftSaved(false); }}><strong>{value}</strong><small>{description}</small></button>)}</div><input type="hidden" name="category" value={category} /><label>{copy("copy_b64705ba9d2d")}<select name="priority" defaultValue={readWaterDraftValue("priority") || "Urgent"} onChange={() => setDraftSaved(false)}>{priorities.map(priority => <option key={priority}>{priority}</option>)}</select></label></section>
-    <section className="water-form-card"><h3>{copy("copy_487b032a571c")}</h3><p>{copy("copy_e4e2959f60c7")}</p><label>{copy("copy_fe6476826a3a")}<input name="title" required maxLength={160} defaultValue={readWaterDraftValue("title")} onChange={() => setDraftSaved(false)} placeholder={copy("copy_879a2b3065ae")} /></label><label>{copy("copy_acb7ba985414")}<input name="area" required maxLength={160} defaultValue={readWaterDraftValue("area")} onChange={() => setDraftSaved(false)} placeholder={copy("copy_2fc8166ce582")} /></label><label>{copy("copy_6b2089276d5a")}<textarea name="details" required rows={5} maxLength={1800} defaultValue={readWaterDraftValue("details")} onChange={() => setDraftSaved(false)} placeholder={copy("copy_e0c033933646")} /></label></section>
-    <section className="water-form-card"><h3>{copy("copy_72098c4c1ad3")}</h3><p>{copy("copy_19968382af70")}</p><div className="water-timeline-grid"><label>{copy("copy_25feba1abd90")}<input name="startsAt" type="datetime-local" defaultValue={readWaterDraftValue("startsAt")} onChange={() => setDraftSaved(false)} /></label><label>{copy("copy_5e4707dcd926")}<input name="endsAt" type="datetime-local" defaultValue={readWaterDraftValue("endsAt")} onChange={() => setDraftSaved(false)} /></label></div></section>
-    {/* ADDED: Interactive Google Map location picker for Water District advisories. */}
+    <div className="water-publish-top"><div><span>WATER OPERATIONS / PUBLIC NOTICES</span><h2>Publish water advisory</h2></div><div><button type="button" onClick={onCancel}>Cancel</button><button type="button" onClick={event => saveDraft(event.currentTarget.form)}>Save draft</button><button type="submit" className="water-primary" disabled={busy}>{busy ? "Publishing…" : "Publish advisory"}</button></div></div>
     <section className="water-form-card">
-      <h3>Affected location on Google Maps</h3>
-      <p>Click the map to place a pin at the affected location. This selection is optional.</p>
+      <div><h3>Classify the service update</h3><p>Choose the advisory type and response priority for this notice.</p></div>
+      <div className="water-category-grid">{categories.map(({ value, description }) => <button type="button" aria-pressed={category === value} className={category === value ? "selected" : ""} key={value} onClick={() => { setCategory(value); setDraftSaved(false); }}><strong>{value}</strong><small>{description}</small></button>)}</div>
+      <input type="hidden" name="category" value={category} />
+      <label>Priority<select name="priority" defaultValue={readWaterDraftValue("priority") || "Urgent"} onChange={() => setDraftSaved(false)}>{priorities.map(priority => <option key={priority}>{priority}</option>)}</select></label>
+    </section>
+    <section className="water-form-card">
+      <div><h3>Advisory headline and affected area</h3><p>Keep the headline brief and identify the impacted district or neighborhood.</p></div>
+      <label>Advisory headline<input name="title" required maxLength={160} defaultValue={readWaterDraftValue("title")} onChange={() => setDraftSaved(false)} placeholder="Summarize the service update" /></label>
+      <label>Affected zone or district<input name="area" required maxLength={160} defaultValue={readWaterDraftValue("area")} onChange={() => setDraftSaved(false)} placeholder="District, barangay, or service area" /></label>
+    </section>
+    <section className="water-form-card">
+      <div><h3>Service window</h3><p>Include the expected work start and estimated restoration time when known.</p></div>
+      <div className="water-timeline-grid">
+        <label>Advisory start<input name="serviceStartsAt" type="datetime-local" defaultValue={readWaterDraftValue("serviceStartsAt")} onChange={() => setDraftSaved(false)} /></label>
+        <label>Estimated restoration<input name="estimatedRestorationAt" type="datetime-local" defaultValue={readWaterDraftValue("estimatedRestorationAt")} onChange={() => setDraftSaved(false)} /></label>
+      </div>
+    </section>
+    <section className="water-form-card">
+      <div className="water-section-heading"><div><h3>Public notice and guidance</h3><p>Explain the impact and any practical steps residents should take.</p></div><small>{detailsLength} / 1800</small></div>
+      <label>Public advisory text<textarea name="details" required rows={6} maxLength={1800} defaultValue={readWaterDraftValue("details")} onChange={event => { setDetailsLength(event.target.value.length); setDraftSaved(false); }} placeholder="Describe the service issue, affected customers, expected timing, and any safety guidance." /></label>
+    </section>
+    <section className="water-form-card">
+      <div><h3>Pin the affected area</h3><p>Optionally mark the service location on the map.</p></div>
       <input type="hidden" name="latitude" value={selectedLocation?.latitude ?? ""} />
       <input type="hidden" name="longitude" value={selectedLocation?.longitude ?? ""} />
-      <GoogleMap mode="picker" height={270} label="Click the map to select a location" onLocationSelected={setSelectedLocation} />
-      <p className="mb-0 mt-2 text-xs text-slate-600">{selectedLocation ? `Selected coordinates: ${selectedLocation.latitude.toFixed(6)}, ${selectedLocation.longitude.toFixed(6)}. Click again to move the pin.` : "No point selected yet. Add a pin to make this announcement appear on the map."}</p>
+      <GoogleMap mode="picker" height={230} label="Select affected service location" onLocationSelected={setSelectedLocation} />
+      <p className="water-selection-note">{selectedLocation ? `Selected point: ${selectedLocation.latitude.toFixed(5)}, ${selectedLocation.longitude.toFixed(5)}` : "No map point selected. The advisory can still be published without one."}</p>
     </section>
-    {/* ADDED: Optional image picker for Water District Gmail attachments. */}
-      <section className="water-form-card">
-        <h3>Announcement image (optional)</h3>
-        <p>Choose an image to attach to email notifications.</p>
-        <label className="block text-xs font-semibold text-slate-700">
-          Image file
-          <input
-            type="file"
-            name="announcementImage"
-            accept="image/jpeg,image/png,image/webp"
-            className="mt-2 block w-full text-xs font-normal"
-            onChange={() => setDraftSaved(false)}
-          />
-        </label>
-        <small>JPEG, PNG, or WebP. Maximum file size: 1 MB.</small>
-      </section>
-      <section className="water-form-card"><h3>{copy("copy_aebccf9c5c72")}</h3><p>{copy("copy_6c5d7be2a766")}</p><div className="water-channel-row"><span><strong>{copy("copy_26608976aae5")}</strong><small>{copy("copy_008e89f8cae7")}</small></span><input type="checkbox" checked readOnly aria-label={copy("copy_5bf4fa859674")} /></div><div className="water-channel-row"><span><strong>{copy("copy_ecd7a93e0777")}</strong><small>{copy("copy_c6be37bce81c")}</small></span><input type="checkbox" disabled aria-label={copy("copy_913029ee5d36")} /></div><GmailConnection portal="water" token={localStorage.getItem("civicalert:water:account")} /></section>
-    <div className="water-publish-footer">{draftSaved && <span className="water-draft-saved" role="status">{copy("copy_39542ad3c14d")}</span>}<button type="button" onClick={onCancel}>{copy("copy_19766ed6ccb2")}</button><button type="button" onClick={event => saveDraft(event.currentTarget.form)}>{copy("copy_3de100106dd4")}</button><button className="water-primary" type="submit" disabled={busy}>{busy ? copy("copy_582e0f1abad4") : copy("copy_1a73e4d6678a")}</button></div>
+    <section className="water-form-card">
+      <div><h3>Notice image (optional)</h3><p>Add a photo or visual for the advisory. Instagram publishing requires an image.</p></div>
+      <label>Image file<input type="file" name="announcementImage" accept="image/jpeg,image/png,image/webp" onChange={event => { const file = event.target.files?.[0]; setImagePreview(file ? URL.createObjectURL(file) : null); setDraftSaved(false); }} /><small>JPEG, PNG, or WebP, up to 15 MB. Oversized images are optimized automatically before upload.</small></label>
+      {imagePreview && <img src={imagePreview} alt="Selected advisory image preview" className="water-image-preview" />}
+    </section>
+    <section className="water-form-card">
+      <div><h3>Choose announcement channels</h3><p>Only selected channels receive this advisory. External accounts must be configured.</p></div>
+      <div className="water-channel-list">
+        {([
+          ["gmail", "Email residents", "Send to residents who opted in to immediate advisory email."],
+          ["facebook", "Facebook", "Publish to the connected utility page."],
+          ["instagram", "Instagram", "Publish an image and caption to the connected account."],
+          ["sms", "Resident inbox alert", "Create simulated inbox alerts; no text messages are sent."],
+        ] as const).map(([value, title, description]) => <label className="water-channel-row" key={value}>
+          <span><strong>{title}</strong><small>{description}</small></span>
+          <input type="checkbox" name="channels" value={value} checked={channels.includes(value)} onChange={() => toggleChannel(value)} />
+        </label>)}
+      </div>
+      <SocialConnectionStatus portal="water" token={token} />
+      <GmailConnection portal="water" token={token} />
+    </section>
+    <section className="water-form-card">
+      <div><h3>Publish timing</h3><p>Publish when ready or set a future release time.</p></div>
+      <label className="water-schedule-toggle"><input type="checkbox" checked={schedule} onChange={event => { setSchedule(event.target.checked); setDraftSaved(false); }} /> Schedule this advisory for later</label>
+      {schedule && <label>Publish date and time<input name="scheduledAt" type="datetime-local" required min={minimumLocalDateTime()} defaultValue={readWaterDraftValue("scheduledAt")} onChange={() => setDraftSaved(false)} /></label>}
+      {!schedule && <input type="hidden" name="scheduledAt" value="" />}
+    </section>
+    <div className="water-publish-footer">{draftSaved && <span className="water-draft-saved" role="status">Draft saved in this browser.</span>}<button type="button" onClick={onCancel}>Cancel</button><button type="button" onClick={event => saveDraft(event.currentTarget.form)}>Save draft</button><button className="water-primary" type="submit" disabled={busy}>{busy ? "Publishing…" : schedule ? "Schedule advisory" : "Publish advisory"}</button></div>
   </form>;
 }
 
 function readWaterDraftValue(name: string) {
   return localStorage.getItem(`civicalert:water:draft:${name}`) || "";
+}
+
+function readWaterDraftChannels(): string[] {
+  const channels = readWaterDraftValue("channels").split("|");
+  return channels.filter(channel => ["gmail", "facebook", "instagram", "sms"].includes(channel));
 }
 
 function WorkTable({ items }: { items: WorkOrder[] }) {
@@ -1514,10 +2064,10 @@ export function mountPortal(portal: Portal) {
   if (!element) throw new Error("Missing #root mount element");
   const root = createRoot(element);
   try {
-    getWorkspace(portal);
+    getSupabase();
     root.render(<PortalApp portal={portal} />);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not initialize the local demo.";
-    root.render(<main role="alert">Could not load demo data: {message}</main>);
+    const message = error instanceof Error ? error.message : "Could not initialize Supabase.";
+    root.render(<main role="alert">{message}</main>);
   }
 }
