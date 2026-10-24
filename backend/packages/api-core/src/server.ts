@@ -16,7 +16,7 @@ import {
   safeGmailError,
   sendGmailMessage,
 } from "./gmail.js";
-import { publishAnnouncementToSocial, type SocialDeliverySummary, type SocialPlatform } from "./social.js";
+import { publishAnnouncementToSocial, socialConfiguration, type SocialDeliverySummary, type SocialPlatform } from "./social.js";
 
 type Portal = "resident" | "cepalco" | "water";
 type Locals = { actor?: Actor };
@@ -84,8 +84,8 @@ function recordSocialPosts(advisoryId: number, summary: SocialDeliverySummary | 
       published_at = CURRENT_TIMESTAMP
   `);
   for (const post of summary.platforms) {
-    if (post.status === "published" && post.id && post.permalinkUrl) {
-      save.run(advisoryId, post.platform, post.id, post.permalinkUrl);
+    if (post.status === "published" && post.id) {
+      save.run(advisoryId, post.platform, post.id, post.permalinkUrl ?? null);
     }
   }
 }
@@ -459,8 +459,6 @@ export function createApi(portal: Portal) {
         .select("id,reference,title,utility,type,area,status,details,priority,service_starts_at,estimated_restoration_at,image_data_url,latitude,longitude,scheduled_at,publication_status,channels")
         .eq("id", advisoryId).eq("utility", utility).single();
       if (advisoryError || !advisory) return res.status(404).json({ error: "Supabase advisory not found." });
-      if (advisory.publication_status === "scheduled") return res.json({ scheduled: true });
-
       try {
         const { data: residents, error: residentsError } = await supabase.from("profiles")
           .select("id,name,email,role,utility,phone_number,address,barangay,district,city,postal_code,profile_image,sms_alerts,notify_maintenance,notify_email_digest,immediate_email_alerts,terms_accepted_at")
@@ -514,6 +512,10 @@ export function createApi(portal: Portal) {
           advisory.longitude, advisory.scheduled_at, advisory.publication_status,
           JSON.stringify(advisory.channels),
         ) as { id: number }).id;
+
+        // Mirror scheduled Supabase notices into the shared API database without publishing yet.
+        // The utility-specific worker will deliver them when their schedule becomes due.
+        if (advisory.publication_status === "scheduled") return res.json({ scheduled: true });
 
         const delivery = await publishSelectedChannels(portal, utility, {
           id: localAdvisoryId,
@@ -700,11 +702,7 @@ export function createApi(portal: Portal) {
     });
 // ADDED: Report which social publishing platforms are configured for this utility.
 app.get("/social/status", requireUtility(utility), (_req, res) => {
-  const facebookConfigured = Boolean(process.env.META_FACEBOOK_PAGE_ID?.trim() && process.env.META_FACEBOOK_PAGE_ACCESS_TOKEN?.trim());
-  const instagramConfigured = Boolean(process.env.META_INSTAGRAM_BUSINESS_ACCOUNT_ID?.trim() &&
-    (process.env.META_INSTAGRAM_ACCESS_TOKEN?.trim() || process.env.META_FACEBOOK_PAGE_ACCESS_TOKEN?.trim()) &&
-    process.env.META_PUBLIC_BASE_URL?.trim());
-  return res.json({ facebook: facebookConfigured, instagram: instagramConfigured });
+  return res.json(socialConfiguration(portal));
 });
 
 // ADDED: Publish or retry publishing an advisory to configured social media accounts.
@@ -787,6 +785,85 @@ app.patch("/advisories/:id/status", requireUtility(utility), (req, res) => {
   return app;
 }
 
+async function syncScheduledDeliveryToSupabase(
+  portal: Exclude<Portal, "resident">,
+  utility: string,
+  reference: string,
+  localAdvisoryId: number,
+): Promise<void> {
+  const url = process.env.SUPABASE_URL?.trim();
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  if (!url || !key) return;
+
+  try {
+    const supabase = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+    const { data: advisory, error: advisoryError } = await supabase.from("advisories")
+      .select("id").eq("reference", reference).eq("utility", utility).maybeSingle();
+    if (advisoryError) throw advisoryError;
+    if (!advisory) return;
+
+    const { data: profiles, error: profilesError } = await supabase.from("profiles")
+      .select("id,email").eq("utility", utility);
+    if (profilesError) throw profilesError;
+    const profileIds = new Map((profiles ?? []).map(profile => [profile.email.toLowerCase(), profile.id]));
+    const localEmails = database.prepare(`
+      SELECT users.email, deliveries.status, deliveries.error_message, deliveries.attempt_count,
+        deliveries.sent_at, deliveries.created_at
+      FROM email_deliveries AS deliveries JOIN users ON users.id = deliveries.resident_id
+      WHERE deliveries.advisory_id = ?
+    `).all(localAdvisoryId) as Array<{
+      email: string; status: "pending" | "sent" | "failed"; error_message: string | null;
+      attempt_count: number; sent_at: string | null; created_at: string;
+    }>;
+    const emailRows = localEmails.flatMap(row => {
+      const residentId = profileIds.get(row.email.toLowerCase());
+      return residentId ? [{
+        advisory_id: advisory.id, resident_id: residentId, status: row.status,
+        error_message: row.error_message, attempt_count: row.attempt_count,
+        sent_at: row.sent_at, created_at: row.created_at,
+      }] : [];
+    });
+    if (emailRows.length) {
+      const { error } = await supabase.from("email_deliveries").upsert(emailRows, { onConflict: "advisory_id,resident_id" });
+      if (error) throw error;
+    }
+
+    const posts = database.prepare(`
+      SELECT platform, post_id, permalink_url, published_at FROM social_posts WHERE advisory_id = ?
+    `).all(localAdvisoryId) as Array<{ platform: string; post_id: string; permalink_url: string | null; published_at: string }>;
+    if (posts.length) {
+      const { error } = await supabase.from("social_posts").upsert(posts.map(post => ({
+        advisory_id: advisory.id, ...post,
+      })), { onConflict: "advisory_id,platform" });
+      if (error) throw error;
+    }
+
+    const smsRows = database.prepare(`
+      SELECT users.email, deliveries.created_at, deliveries.read_at
+      FROM sms_deliveries AS deliveries JOIN users ON users.id = deliveries.resident_id
+      WHERE deliveries.advisory_id = ?
+    `).all(localAdvisoryId) as Array<{ email: string; created_at: string; read_at: string | null }>;
+    const mappedSms = smsRows.flatMap(row => {
+      const residentId = profileIds.get(row.email.toLowerCase());
+      return residentId ? [{ advisory_id: advisory.id, resident_id: residentId, created_at: row.created_at, read_at: row.read_at }] : [];
+    });
+    if (mappedSms.length) {
+      const { error } = await supabase.from("sms_deliveries").upsert(mappedSms, {
+        onConflict: "advisory_id,resident_id", ignoreDuplicates: true,
+      });
+      if (error) throw error;
+    }
+
+    const { error: updateError } = await supabase.from("advisories").update({
+      publication_status: "published", status: "Monitoring",
+    }).eq("id", advisory.id).eq("utility", utility);
+    if (updateError) throw updateError;
+  } catch (error) {
+    // Do not mark an already-published external announcement failed just because its mirror sync failed.
+    console.error(`[${portal}-api] Could not sync scheduled delivery to Supabase for ${reference}:`, error);
+  }
+}
+
 export function startScheduledAnnouncementWorker(portal: Exclude<Portal, "resident">): () => void {
   const utility = utilities[portal];
   let running = false;
@@ -837,6 +914,7 @@ export function startScheduledAnnouncementWorker(portal: Exclude<Portal, "reside
             details: advisory.details,
             imageDataUrl: advisory.image_data_url,
           }, channels);
+          await syncScheduledDeliveryToSupabase(portal, utility, advisory.reference, advisory.id);
           database.prepare(`
             UPDATE advisories SET publication_status = 'published', status = 'Monitoring'
             WHERE id = ? AND utility = ? AND publication_status = 'publishing'

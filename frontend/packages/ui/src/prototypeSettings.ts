@@ -106,8 +106,6 @@ export const portalSettings = {
       { key: "incidents", label: "Active disruptions", icon: "alert" },
       { key: "scheduled", label: "Scheduled works", icon: "calendar" },
       { key: "restoration", label: "Restoration map", icon: "map" },
-      { key: "residents", label: "Resident reports", icon: "people" },
-      { key: "publish", label: "Create announcement", icon: "plus" },
       { key: "inbox", label: "Virtual SMS inbox", icon: "messages" },
     ],
     pageTitles: {
@@ -163,7 +161,6 @@ export const portalSettings = {
       { key: "activeDisruptions", label: "Active disruptions", icon: "alert", badge: "Critical 1" },
       { key: "scheduledWorks", label: "Scheduled this week", icon: "calendar", badge: "Queued" },
       { key: "restorationOnTime", label: "Restoration on time", icon: "pulse", value: "94%", badge: "+2.4% vs mo" },
-      { key: "residentReports", label: "Resident reports", icon: "people", badge: "All clear" },
     ],
     mapMetrics: [
       { key: "feedersOnline", label: "Feeders online", value: "98.4%", detail: "92 / 94 active", icon: "pulse" },
@@ -202,7 +199,6 @@ export const portalSettings = {
       { key: "incidents", label: "Water advisories", icon: "alert" },
       { key: "scheduled", label: "Maintenance schedule", icon: "calendar" },
       { key: "restoration", label: "Network map", icon: "map" },
-      { key: "residents", label: "Service reports", icon: "people" },
       { key: "inbox", label: "Virtual SMS inbox", icon: "messages" },
     ],
     pageTitles: {
@@ -248,7 +244,6 @@ export const portalSettings = {
       { key: "activeAdvisories", label: "Active water advisories", icon: "water" },
       { key: "averagePressure", label: "Average network pressure", icon: "pulse" },
       { key: "scheduledMaintenance", label: "Scheduled maintenance", icon: "calendar" },
-      { key: "residentReports", label: "Resident service reports", icon: "people" },
     ],
     maps: {
       mini: [

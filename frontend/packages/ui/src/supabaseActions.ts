@@ -162,7 +162,7 @@ export async function supabaseAction<T>(
     }).select("*").single();
     if (error) throw new Error(error.message);
     let delivery: Record<string, unknown> | null = null;
-    if (!scheduledAt) {
+    {
       const apiBaseUrl = ({
         resident: import.meta.env.VITE_RESIDENT_API_URL || "http://localhost:4101",
         cepalco: import.meta.env.VITE_CEPALCO_API_URL || "http://localhost:4102",

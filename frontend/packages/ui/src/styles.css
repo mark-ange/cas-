@@ -734,3 +734,191 @@ input[type="checkbox"] {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-3px); }
 }
+
+/* Shared readability floor: compact 7–11px utility labels made every portal
+   feel like a dense data table. Keep the intended hierarchy, but never render
+   interface copy below a comfortable 12px on desktop or mobile. */
+:is(.portal-resident, .portal-cepalco, .portal-water, .resident-auth, .cepalco-login, .water-login)
+  :is(.text-\[7px\], .text-\[8px\], .text-\[9px\], .text-\[10px\], .text-\[11px\]) {
+  font-size: 12px !important;
+  line-height: 1.45 !important;
+}
+
+/* Let the authenticated workspace use the complete viewport; retain the
+   responsive gutters already applied by the layout utility classes. */
+.portal-resident .portal-layout,
+.portal-cepalco .portal-layout,
+.portal-water .portal-layout {
+  width: 100%;
+  max-width: none !important;
+  margin-inline: 0 !important;
+}
+
+/* The resident sign-in/register split view is the page, not a floating card. */
+.resident-auth-wrap {
+  min-height: 100vh;
+  padding: 0 !important;
+}
+
+.resident-auth-card {
+  width: 100%;
+  max-width: none !important;
+  min-height: 100vh;
+  border-radius: 0 !important;
+  border-inline: 0 !important;
+}
+
+@media (max-height: 700px) and (min-width: 1024px) {
+  .resident-auth-art,
+  .resident-auth-form {
+    padding-block: 24px !important;
+  }
+}
+
+@media (min-width: 1024px) {
+  html:has(.resident-auth),
+  body:has(.resident-auth) {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .resident-auth {
+    position: fixed !important;
+    inset: 0;
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden !important;
+    margin: 0 !important;
+  }
+
+  .resident-auth-wrap {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .resident-auth-card {
+    display: grid;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    max-width: none !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .resident-auth-art,
+  .resident-auth-form {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .resident-auth-art {
+    overflow-y: auto;
+  }
+
+  .resident-auth-form {
+    display: grid !important;
+    grid-template-rows: auto minmax(0, 1fr);
+    justify-content: stretch !important;
+    align-content: stretch;
+    overflow: hidden !important;
+  }
+
+  .resident-auth-mode-switcher {
+    margin-bottom: 16px !important;
+  }
+
+  .resident-auth-content {
+    min-height: 0;
+    overflow-y: auto;
+  }
+}
+
+/* Use grouped metric strips and separators instead of nesting a bordered card
+   around every dashboard widget and every item inside it. */
+.portal-water .water-overview > section:first-child,
+.portal-cepalco .cepalco-metrics,
+.portal-resident .resident-workspace > section:first-child {
+  gap: 0 !important;
+  overflow: hidden;
+  border: 1px solid #dce7ea;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: none;
+}
+
+.portal-water .water-overview > section:first-child > article,
+.portal-cepalco .cepalco-metrics > .cepalco-card,
+.portal-resident .resident-workspace > section:first-child > .resident-metric-card {
+  min-width: 0;
+  min-height: 0;
+  border: 0 !important;
+  border-right: 1px solid #e6edef !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
+  padding: 16px !important;
+}
+
+.portal-water .water-overview > section:first-child > article:last-child,
+.portal-cepalco .cepalco-metrics > .cepalco-card:last-child,
+.portal-resident .resident-workspace > section:first-child > .resident-metric-card:last-child {
+  border-right: 0 !important;
+}
+
+.portal-water .water-overview > section > div > article,
+.portal-cepalco .cepalco-dashboard-grid > div > .cepalco-card,
+.portal-resident .resident-workspace > section:nth-child(2) > article,
+.portal-resident .resident-workspace > section:nth-child(2) > div > article {
+  border: 0 !important;
+  border-bottom: 1px solid #dce7ea !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
+  padding: 16px 4px !important;
+}
+
+.portal-water .water-overview [data-search-item],
+.portal-cepalco .cepalco-dashboard-grid .cepalco-incident-card.compact,
+.portal-resident .resident-workspace .resident-advisory-card {
+  border: 0 !important;
+  border-bottom: 1px solid #e6edef !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.portal-water .water-overview [data-search-item]:hover,
+.portal-cepalco .cepalco-dashboard-grid .cepalco-incident-card.compact:hover,
+.portal-resident .resident-workspace .resident-advisory-card:hover {
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.portal-water .water-overview > section:first-child > article:hover,
+.portal-cepalco .cepalco-metrics > .cepalco-card:hover,
+.portal-resident .resident-workspace > section:first-child > .resident-metric-card:hover {
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+@media (max-width: 640px) {
+  .portal-water .water-overview > section:first-child > article,
+  .portal-cepalco .cepalco-metrics > .cepalco-card,
+  .portal-resident .resident-workspace > section:first-child > .resident-metric-card {
+    padding: 12px 10px !important;
+  }
+}
