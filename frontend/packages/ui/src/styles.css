@@ -775,6 +775,93 @@ input[type="checkbox"] {
   }
 }
 
+@media (max-width: 1023px) {
+  html:has(.resident-auth),
+  body:has(.resident-auth) {
+    width: 100%;
+    height: auto;
+  }
+
+  html:has(.resident-auth) {
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  body:has(.resident-auth) {
+    overflow: visible;
+  }
+
+  .resident-auth {
+    position: relative !important;
+    inset: auto;
+    display: block;
+    width: 100%;
+    height: auto;
+    min-height: 100vh;
+    min-height: 100dvh;
+    overflow: visible !important;
+    margin: 0 !important;
+    background: #ffffff !important;
+  }
+
+  .resident-auth > .pointer-events-none {
+    display: none;
+  }
+
+  .resident-auth-wrap {
+    position: relative;
+    inset: auto;
+    display: block;
+    width: 100%;
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .resident-auth-card {
+    display: grid;
+    width: 100%;
+    height: auto;
+    min-height: 100dvh;
+    max-width: none !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: auto auto;
+    overflow: visible;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: #ffffff !important;
+    box-shadow: none !important;
+  }
+
+  .resident-auth-art {
+    height: auto;
+    min-height: 55vh;
+    overflow: hidden;
+  }
+
+  .resident-auth-form {
+    display: flex !important;
+    height: auto;
+    min-height: 60vh;
+    overflow: visible !important;
+    justify-content: center !important;
+  }
+
+  .resident-auth-mode-switcher {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    flex-shrink: 0;
+    padding-block: 8px;
+    background: #ffffff;
+  }
+
+  .resident-auth-content {
+    min-height: 0;
+    overflow: visible;
+  }
+}
+
 @media (min-width: 1024px) {
   html:has(.resident-auth),
   body:has(.resident-auth) {
