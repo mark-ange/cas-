@@ -106,7 +106,6 @@ export const portalSettings = {
       { key: "incidents", label: "Active disruptions", icon: "alert" },
       { key: "scheduled", label: "Scheduled works", icon: "calendar" },
       { key: "restoration", label: "Restoration map", icon: "map" },
-      { key: "inbox", label: "Virtual SMS inbox", icon: "messages" },
     ],
     pageTitles: {
       overview: "Operations overview",
@@ -115,7 +114,6 @@ export const portalSettings = {
       restoration: "Restoration map",
       residents: "Resident reports",
       publish: "Create announcement",
-      inbox: "Virtual SMS Inbox",
     },
     pageDescriptions: {
       overview: "Your service area status and latest verified community updates.",
@@ -124,7 +122,6 @@ export const portalSettings = {
       restoration: "Review local service activity by district.",
       residents: "Review service reports submitted by residents.",
       publish: "Enter report details, choose a location and channels, then publish now or schedule your announcement.",
-      inbox: "Review sample SMS notifications; nothing is sent to a phone.",
     },
     sidebarLabel: "CEPALCO OPERATIONS",
     pageHeadingLabel: "CEPALCO OPERATIONS",
@@ -199,7 +196,6 @@ export const portalSettings = {
       { key: "incidents", label: "Water advisories", icon: "alert" },
       { key: "scheduled", label: "Maintenance schedule", icon: "calendar" },
       { key: "restoration", label: "Network map", icon: "map" },
-      { key: "inbox", label: "Virtual SMS inbox", icon: "messages" },
     ],
     pageTitles: {
       overview: "Water network overview",
@@ -208,7 +204,6 @@ export const portalSettings = {
       restoration: "Water network map",
       residents: "Water service reports",
       publish: "Create announcement",
-      inbox: "Virtual SMS Inbox",
     },
     pageDescriptions: {
       overview: "Monitor water quality, pressure, advisories, and maintenance across the district.",
@@ -217,7 +212,6 @@ export const portalSettings = {
       restoration: "Review local service activity by district.",
       residents: "Review service reports submitted by residents.",
       publish: "Enter report details, choose a location and channels, then publish now or schedule your announcement.",
-      inbox: "Review sample SMS notifications; nothing is sent to a phone.",
     },
     sidebarLabel: "WATER DISTRICT OPERATIONS",
     pageHeadingLabel: "WATER DISTRICT OPERATIONS",

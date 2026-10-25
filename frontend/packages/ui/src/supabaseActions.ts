@@ -265,6 +265,7 @@ export async function supabaseAction<T>(
   }
 
   if (path === "/inbox" && method === "GET") {
+    if (portal !== "resident") throw new Error("The simulated SMS inbox is available only to residents.");
     const profile = await profileForPortal();
     const { data, error } = await supabase.from("sms_deliveries")
       .select("id,resident_id,read_at,created_at,advisories(reference,title,utility,area)")
@@ -289,6 +290,7 @@ export async function supabaseAction<T>(
 
   const inboxRead = path.match(/^\/inbox\/(\d+)\/read$/);
   if (inboxRead && method === "PATCH") {
+    if (portal !== "resident") throw new Error("The simulated SMS inbox is available only to residents.");
     const profile = await profileForPortal();
     const { error, count } = await supabase.from("sms_deliveries").update({ read_at: new Date().toISOString() }, { count: "exact" })
       .eq("id", Number(inboxRead[1])).eq("resident_id", profile.id);

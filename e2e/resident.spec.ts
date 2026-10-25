@@ -104,7 +104,6 @@ test.describe('Resident Portal (http://localhost:5173)', () => {
     await page.fill('input[name="confirmPassword"]', 'Password123!');
     await page.check('input[name="termsAccepted"]');
     await page.check('input[name="smsAlerts"]');
-    await page.check('input[name="immediateEmailAlerts"]');
 
     await page.click('button:has-text("Complete"), button:has-text("Register"), button:has-text("Create")');
 

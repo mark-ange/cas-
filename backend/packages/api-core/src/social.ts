@@ -161,7 +161,7 @@ export async function publishAnnouncementToSocial(
   area: string,
   details: string,
   imageDataUrl: string | null,
-  selectedPlatforms: SocialPlatform[] = ["facebook", "instagram"],
+  selectedPlatforms: SocialPlatform[] = ["facebook"],
 ): Promise<SocialDeliverySummary> {
   const platforms = await Promise.all(selectedPlatforms.map(platform => platform === "facebook"
     ? publishToFacebook(portal, title, area, details, reference, imageDataUrl)

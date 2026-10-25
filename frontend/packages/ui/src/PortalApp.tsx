@@ -18,7 +18,8 @@ import { supabaseAction } from "./supabaseActions.js";
 import "./styles.css";
 
 const portalSettings = localPortalSettings;
-const DEFAULT_ANNOUNCEMENT_CHANNELS = ["facebook", "instagram", "gmail"];
+const REQUIRED_ANNOUNCEMENT_CHANNELS = ["facebook", "gmail"] as const;
+const DEFAULT_ANNOUNCEMENT_CHANNELS = [...REQUIRED_ANNOUNCEMENT_CHANNELS];
 
 type EmailDeliverySummary = {
   status: string;
@@ -40,6 +41,10 @@ function settingsFor(portal: Portal): PortalSettings {
 function requiredSetting<T>(value: T | undefined, name: string): T {
   if (value === undefined) throw new Error(`Missing prototype setting: ${name}.`);
   return value;
+}
+
+function isRequiredAnnouncementChannel(channel: string): boolean {
+  return REQUIRED_ANNOUNCEMENT_CHANNELS.some(requiredChannel => requiredChannel === channel);
 }
 
 function apiBaseUrl(portal: Portal): string {
@@ -652,13 +657,7 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
                     <span>{copy("copy_e2d06d28e9c3")}</span>
                   </label>
 
-                  <label className="flex items-start gap-2.5 text-xs text-slate-700 cursor-pointer">
-                    <input name="immediateEmailAlerts" type="checkbox" className="mt-0.5 h-4 w-4 rounded accent-rose-600" />
-                    <span>
-                      <strong className="block font-semibold text-slate-900">{copy("immediateEmailAlertsTitle")}</strong>
-                      <span className="text-slate-500 text-[11px]">{copy("immediateEmailAlertsInfo")}</span>
-                    </span>
-                  </label>
+                  <p className="m-0 pl-6 text-slate-500 text-[11px]">{copy("mandatoryAdvisoryEmailInfo")}</p>
                 </div>
 
                 <button
@@ -801,7 +800,7 @@ function App({ portal }: { portal: Portal }) {
         ]);
         setItems({ advisories, workOrders, reports: [], network });
       }
-      setInbox(await localAction<SMSRecord[]>(portal, "/inbox", token));
+      setInbox(isResident ? await localAction<SMSRecord[]>(portal, "/inbox", token) : []);
       setError(copy("copy_e3b0c44298fc"));
     } catch (err) {
       setError(err instanceof Error ? err.message : copy("copy_e583d95bd720"));
@@ -840,7 +839,6 @@ function App({ portal }: { portal: Portal }) {
         postalCode: data.get("postalCode"),
         termsAccepted: data.get("termsAccepted") === "on",
         smsAlerts: data.get("smsAlerts") === "on",
-        immediateEmailAlerts: data.get("immediateEmailAlerts") === "on",
       }) });
       localStorage.setItem(`civicalert:${portal}:account`, response.token);
       setActor(response.actor); setToken(response.token);
@@ -896,7 +894,10 @@ function App({ portal }: { portal: Portal }) {
     const form = new FormData(event.currentTarget);
     try {
       const imageDataUrl = await readAnnouncementImage(form.get("announcementImage"));
-      const selectedChannels = form.getAll("channels").map(String);
+      const selectedChannels = [...new Set([
+        ...form.getAll("channels").map(String),
+        ...REQUIRED_ANNOUNCEMENT_CHANNELS,
+      ])];
       if (selectedChannels.length === 0) {
         throw new Error("Select at least one announcement channel.");
       }
@@ -942,7 +943,7 @@ function App({ portal }: { portal: Portal }) {
         const deliveryResults: string[] = [];
         if (selectedChannels.includes("gmail")) {
           const summary = published.emailDelivery;
-          deliveryResults.push(`Gmail: ${summary?.sent ? `${summary.sent} sent${summary.failed ? `, ${summary.failed} failed` : ""}` : summary?.failed ? `${summary.failed} failed` : summary?.status === "no_recipients" ? "no opted-in recipients" : "not sent"}`);
+          deliveryResults.push(`Gmail: ${summary?.sent ? `${summary.sent} sent${summary.failed ? `, ${summary.failed} failed` : ""}` : summary?.failed ? `${summary.failed} failed` : summary?.status === "no_recipients" ? "no resident accounts" : "not sent"}`);
         }
         for (const platform of published.socialDelivery?.platforms ?? []) {
           deliveryResults.push(`${platform.platform}: ${platform.status}${platform.permalinkUrl ? ` — ${platform.permalinkUrl}` : ""}${platform.message ? ` (${platform.message})` : ""}`);
@@ -1017,7 +1018,6 @@ function App({ portal }: { portal: Portal }) {
           smsAlerts: form.get("smsAlerts") === "on",
           maintenanceAlerts: form.get("maintenanceAlerts") === "on",
           emailDigest: form.get("emailDigest") === "on",
-          immediateEmailAlerts: form.get("immediateEmailAlerts") === "on",
           profileImage: profileImage === null ? actor.profileImage ?? null : profileImage || null,
         }),
       });
@@ -1098,13 +1098,13 @@ function App({ portal }: { portal: Portal }) {
           {publishedDelivery.summary.failed > 0 && <button type="button" onClick={() => void retryFailedEmails()} disabled={retryingEmail} className="rounded-md border border-current px-3 py-2 text-xs font-semibold disabled:opacity-60">{retryingEmail ? "Retrying…" : "Retry failed email(s)"}</button>}
         </div>}
         {loading && <div className="mb-4 h-1 overflow-hidden rounded-full bg-slate-200"><div className="h-full w-1/3 animate-pulse bg-[var(--brand)]" /></div>}
-        {page === "overview" ? <Overview portal={portal} actor={actor} advisories={activeAdvisories} workOrders={items.workOrders} network={items.network} onNavigate={navigate} onAction={kind => kind === "advisory" && !isResident ? navigate("publish") : setModal(kind)} /> : page === "inbox" ? <VirtualInbox messages={inbox} onRead={async message => { await localAction(portal, `/inbox/${message.id}/read`, token, { method: "PATCH" }); await loadWorkspace(); }} /> : page === "profile" && isResident ? <ResidentProfile actor={actor} selectedImage={profileImage} saving={busy} onImageChange={setProfileImage} onSave={saveProfile} onPasswordChange={updatePassword} /> : page === "advisories" && isResident ? <ResidentAdvisories items={items.advisories} workOrders={items.workOrders} /> : (portal === "cepalco" || portal === "water") && page === "publish" ? portal === "water" ? <WaterPublishForm busy={busy} token={token} onCancel={() => navigate("overview")} onSubmit={publishAnnouncement} /> : <AnnouncementComposer portal={portal} busy={busy} token={token} onCancel={() => navigate("overview")} onSubmit={publishAnnouncement} /> : portal === "cepalco" && page === "incidents" ? <CepalcoDisruptions items={advisories} onStatusUpdate={updateAdvisoryStatus} /> : portal === "cepalco" && page === "scheduled" ? <CepalcoSchedule workOrders={items.workOrders} onCreate={() => setModal("work")} /> : portal === "water" && page === "incidents" ? <WaterAdvisories items={items.advisories} /> : portal === "water" && page === "scheduled" ? <WaterSchedule items={items.workOrders} onCreate={() => setModal("work")} /> : portal === "cepalco" && page === "restoration" ? <CepalcoRestorationMap advisories={advisories} /> : page === "restoration" ? <Network portal={portal} advisories={advisories} network={items.network} /> : page === "services" ? <Services advisories={items.advisories} /> : <section className="space-y-4">
+        {page === "overview" ? <Overview portal={portal} actor={actor} advisories={activeAdvisories} workOrders={items.workOrders} network={items.network} onNavigate={navigate} onAction={kind => kind === "advisory" && !isResident ? navigate("publish") : setModal(kind)} /> : isResident && page === "inbox" ? <VirtualInbox messages={inbox} onRead={async message => { await localAction(portal, `/inbox/${message.id}/read`, token, { method: "PATCH" }); await loadWorkspace(); }} /> : page === "profile" && isResident ? <ResidentProfile actor={actor} selectedImage={profileImage} saving={busy} onImageChange={setProfileImage} onSave={saveProfile} onPasswordChange={updatePassword} /> : page === "advisories" && isResident ? <ResidentAdvisories items={items.advisories} workOrders={items.workOrders} /> : (portal === "cepalco" || portal === "water") && page === "publish" ? portal === "water" ? <WaterPublishForm busy={busy} token={token} onCancel={() => navigate("overview")} onSubmit={publishAnnouncement} /> : <AnnouncementComposer portal={portal} busy={busy} token={token} onCancel={() => navigate("overview")} onSubmit={publishAnnouncement} /> : portal === "cepalco" && page === "incidents" ? <CepalcoDisruptions items={items.advisories} onStatusUpdate={updateAdvisoryStatus} /> : portal === "cepalco" && page === "scheduled" ? <CepalcoSchedule workOrders={items.workOrders} onCreate={() => setModal("work")} /> : portal === "water" && page === "incidents" ? <WaterAdvisories items={items.advisories} /> : portal === "water" && page === "scheduled" ? <WaterSchedule items={items.workOrders} onCreate={() => setModal("work")} /> : portal === "cepalco" && page === "restoration" ? <CepalcoRestorationMap advisories={advisories} /> : page === "restoration" ? <Network portal={portal} advisories={advisories} network={items.network} /> : page === "services" ? <Services advisories={items.advisories} /> : <section className="space-y-4">
           {page === "incidents" && <div className="flex flex-wrap items-center justify-between gap-3"><label className="flex min-w-[230px] flex-1 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-slate-400"><Icon name="search" className="h-4 w-4" /><input className="w-full border-0 bg-transparent text-xs text-slate-800 outline-none" placeholder={copy("copy_7145ac5f783f")} onChange={event => document.querySelectorAll<HTMLElement>("[data-search-item]").forEach(card => { card.hidden = !card.innerText.toLowerCase().includes(event.target.value.toLowerCase()); })} /></label>{!isResident && <button onClick={() => setModal("advisory")} className="rounded-lg bg-[var(--brand)] px-4 py-2.5 text-xs font-bold text-white">{copy("copy_dd425feef83c")}{newButton}</button>}</div>}
           <div className="grid gap-3 xl:grid-cols-2">{sectionItems.map(item => <DataCard key={item.id} item={item} page={page} />)}{sectionItems.length === 0 && <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500">{copy("copy_9b2835326f52")}</div>}</div>
         </section>}
       </section>
     </div>
-    {toast && <div role={toast.startsWith("Announcement saved.") && /failed|not_configured|no opted-in|no text was sent|not sent/i.test(toast) ? "alert" : "status"} className={`fixed bottom-5 right-5 z-40 rounded-lg px-4 py-3 text-sm font-medium text-white shadow-xl ${toast.startsWith("Announcement saved.") && /failed|not_configured|no opted-in|no text was sent|not sent/i.test(toast) ? "bg-amber-800" : "bg-emerald-900"}`}>{toast}</div>}
+    {toast && <div role={toast.startsWith("Announcement saved.") && /failed|not_configured|no resident accounts|no text was sent|not sent/i.test(toast) ? "alert" : "status"} className={`fixed bottom-5 right-5 z-40 rounded-lg px-4 py-3 text-sm font-medium text-white shadow-xl ${toast.startsWith("Announcement saved.") && /failed|not_configured|no resident accounts|no text was sent|not sent/i.test(toast) ? "bg-amber-800" : "bg-emerald-900"}`}>{toast}</div>}
     {modal && <RecordModal portal={portal} kind={modal} onClose={() => setModal(null)} onSubmit={submitRecord} />}
   </main>;
 }
@@ -1170,7 +1170,7 @@ function ResidentProfile({ actor, selectedImage, saving, onImageChange, onSave, 
         <ProfilePreference name="smsAlerts" checked={actor.smsAlerts ?? true} title={copy("copy_ab3dd828aa41")} description={copy("copy_abe5bf56e7fd")} />
         <ProfilePreference name="maintenanceAlerts" checked={actor.maintenanceAlerts ?? true} title={copy("copy_c1d8fd5aca7b")} description={copy("copy_c59d87c00621")} />
         <ProfilePreference name="emailDigest" checked={actor.emailDigest ?? true} title={copy("copy_70c407729c22")} description={copy("copy_379b43036c4a")} />
-        <ProfilePreference name="immediateEmailAlerts" checked={actor.immediateEmailAlerts ?? false} title={copy("immediateEmailAlertsTitle")} description={copy("immediateEmailAlertsInfo")} />
+        <p className="mb-0 mt-3 text-[8px] text-slate-500">{copy("mandatoryAdvisoryEmailInfo")}</p>
         <p className="mb-0 mt-3 text-[8px] text-slate-400">{copy("copy_516efbeb02d9")}</p>
       </article>
       <div className="flex justify-end"><button disabled={saving} className="rounded-lg bg-[#64234f] px-5 py-2.5 text-[9px] font-bold text-white disabled:opacity-60">{saving ? copy("copy_395207583eb8") : copy("copy_1964f29935ed")}</button></div>
@@ -1283,9 +1283,10 @@ function SocialConnectionStatus({ portal, token }: { portal: "cepalco" | "water"
   if (error) return <p role="alert" className="mb-0 text-xs text-rose-700">{error}</p>;
   if (!status) return <p className="mb-0 text-xs text-slate-500">Checking social publishing setup…</p>;
   return <p className="mb-0 text-xs text-slate-600">
-    Facebook: <strong className={status.facebook ? "text-emerald-700" : "text-amber-700"}>{status.facebook ? "connected" : "server setup required"}</strong>
+    Facebook: <strong className={status.facebook ? "text-emerald-700" : "text-amber-700"}>{status.facebook ? "configured" : "server setup required"}</strong>
     {" · "}
-    Instagram: <strong className={status.instagram ? "text-emerald-700" : "text-amber-700"}>{status.instagram ? "connected" : "server setup required"}</strong>
+    Instagram: <strong className={status.instagram ? "text-emerald-700" : "text-amber-700"}>{status.instagram ? "configured" : "server setup required"}</strong>
+    {" · Meta checks token validity when publishing"}
   </p>;
 }
 
@@ -1467,15 +1468,15 @@ function GenericAnnouncementComposer({
     </section>
     <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-5">
       <h3 className="m-0 text-sm font-bold text-slate-900">Announcement channels</h3>
-      <p className="m-0 text-xs text-slate-500">Select one or more channels. Social accounts and Gmail must be configured by an administrator.</p>
+      <p className="m-0 text-xs text-slate-500">Facebook and Gmail are included with every announcement. Other channels are optional.</p>
       <div className="grid gap-2 sm:grid-cols-2">
         {([
-          ["facebook", "Facebook", "Post to the utility Facebook page."],
+          ["facebook", "Facebook", "Post every announcement to the utility Facebook page."],
           ["instagram", "Instagram", "Publish an image and caption to Instagram."],
-          ["gmail", "Gmail", "Email residents who opted in to immediate advisory alerts."],
+          ["gmail", "Gmail", "Email every registered resident with the announcement image."],
           ["sms", "SMS (simulated)", "Add a simulated alert to opted-in residents' inboxes; no text message is sent."],
         ] as const).map(([value, title, description]) => <label key={value} className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-3 text-xs">
-          <input type="checkbox" name="channels" value={value} className="mt-0.5 accent-[var(--brand)]" />
+          <input type="checkbox" name="channels" value={value} checked={isRequiredAnnouncementChannel(value)} disabled={isRequiredAnnouncementChannel(value)} className="mt-0.5 accent-[var(--brand)]" />
           <span><strong className="block text-slate-800">{title}</strong><small className="mt-1 block text-slate-500">{description}</small></span>
         </label>)}
       </div>
@@ -1533,6 +1534,7 @@ function CepalcoPublishForm({ busy, token, onCancel, onSubmit }: { busy: boolean
     setDraftSaved(true);
   }
   function toggleChannel(channel: string) {
+    if (isRequiredAnnouncementChannel(channel)) return;
     setChannels(current => current.includes(channel)
       ? current.filter(value => value !== channel)
       : [...current, channel]);
@@ -1582,14 +1584,14 @@ function CepalcoPublishForm({ busy, token, onCancel, onSubmit }: { busy: boolean
       </section>
       <section className="cepalco-form-card">
         <h2>Distribution channels</h2>
-        <p>Select one or more channels. External accounts must be configured on the CEPALCO API.</p>
+        <p>Facebook and Gmail are included with every announcement. Other channels are optional.</p>
         {([
-          ["gmail", "Gmail", "Email residents who opted in to immediate advisory email."],
-          ["facebook", "Facebook", "Post the update to the connected CEPALCO page."],
+          ["gmail", "Gmail", "Email every registered resident with the announcement image."],
+          ["facebook", "Facebook", "Post every announcement to the connected CEPALCO page."],
           ["instagram", "Instagram", "Publish an image and caption to the connected account."],
           ["sms", "Resident inbox alert", "Create simulated inbox alerts; no text messages are sent."],
         ] as const).map(([value, title, description]) => <label className="cepalco-channel" key={value}>
-          <input type="checkbox" name="channels" value={value} checked={channels.includes(value)} onChange={() => toggleChannel(value)} />
+          <input type="checkbox" name="channels" value={value} checked={isRequiredAnnouncementChannel(value) || channels.includes(value)} disabled={isRequiredAnnouncementChannel(value)} onChange={() => toggleChannel(value)} />
           <span><strong>{title}</strong><small>{description}</small></span>
         </label>)}
         <SocialConnectionStatus portal="cepalco" token={token} />
@@ -1929,6 +1931,7 @@ function WaterPublishForm({ busy, token, onCancel, onSubmit }: { busy: boolean; 
     setDraftSaved(true);
   };
   const toggleChannel = (channel: string) => {
+    if (isRequiredAnnouncementChannel(channel)) return;
     setChannels(current => current.includes(channel)
       ? current.filter(value => value !== channel)
       : [...current, channel]);
@@ -1971,16 +1974,16 @@ function WaterPublishForm({ busy, token, onCancel, onSubmit }: { busy: boolean; 
       {imagePreview && <img src={imagePreview} alt="Selected advisory image preview" className="water-image-preview" />}
     </section>
     <section className="water-form-card">
-      <div><h3>Choose announcement channels</h3><p>Only selected channels receive this advisory. External accounts must be configured.</p></div>
+      <div><h3>Announcement channels</h3><p>Facebook and Gmail are sent for every announcement. Other channels are optional.</p></div>
       <div className="water-channel-list">
         {([
-          ["gmail", "Email residents", "Send to residents who opted in to immediate advisory email."],
-          ["facebook", "Facebook", "Publish to the connected utility page."],
+          ["gmail", "Email residents", "Email every registered resident with the announcement image."],
+          ["facebook", "Facebook", "Publish every announcement to the connected utility page."],
           ["instagram", "Instagram", "Publish an image and caption to the connected account."],
           ["sms", "Resident inbox alert", "Create simulated inbox alerts; no text messages are sent."],
         ] as const).map(([value, title, description]) => <label className="water-channel-row" key={value}>
           <span><strong>{title}</strong><small>{description}</small></span>
-          <input type="checkbox" name="channels" value={value} checked={channels.includes(value)} onChange={() => toggleChannel(value)} />
+          <input type="checkbox" name="channels" value={value} checked={isRequiredAnnouncementChannel(value) || channels.includes(value)} disabled={isRequiredAnnouncementChannel(value)} onChange={() => toggleChannel(value)} />
         </label>)}
       </div>
       <SocialConnectionStatus portal="water" token={token} />
