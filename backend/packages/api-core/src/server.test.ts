@@ -14,6 +14,14 @@ delete process.env.GMAIL_OAUTH_CLIENT_SECRET;
 delete process.env.GMAIL_TOKEN_ENCRYPTION_KEY;
 delete process.env.CEPALCO_GMAIL_SENDER_EMAIL;
 delete process.env.WATER_GMAIL_SENDER_EMAIL;
+// Keep the API test hermetic: resident targeting should use only the isolated
+// SQLite fixtures created below, never profiles from a configured Supabase project.
+delete process.env.SUPABASE_URL;
+delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+delete process.env.META_FACEBOOK_PAGE_ID;
+delete process.env.META_FACEBOOK_PAGE_ACCESS_TOKEN;
+delete process.env.META_INSTAGRAM_BUSINESS_ACCOUNT_ID;
+delete process.env.META_INSTAGRAM_ACCESS_TOKEN;
 
 const [{ createApi, startScheduledAnnouncementWorker }, { database }] = await Promise.all([
   import("./server.js"),
@@ -51,7 +59,7 @@ after(async () => {
   rmSync(databaseDirectory, { recursive: true, force: true });
 });
 
-test("resident consent controls advisory email delivery and admins remain utility-scoped", async () => {
+test("resident profile edits preserve location and dispatch stays targeted and utility-scoped", async () => {
   const residentApi = await startApi("resident");
   const cepalcoApi = await startApi("cepalco");
   const waterApi = await startApi("water");
@@ -90,6 +98,7 @@ test("resident consent controls advisory email delivery and admins remain utilit
     ...registrationFields,
     name: "Nonconsenting Resident",
     email: "not-opted-in@example.test",
+    smsAlerts: false,
   });
   assert.equal(optedOutRegistration.response.status, 201);
 
@@ -118,7 +127,7 @@ test("resident consent controls advisory email delivery and admins remain utilit
   process.env.META_FACEBOOK_PAGE_ACCESS_TOKEN = "test-page-token";
   globalThis.fetch = async (input, init) => {
     const url = new URL(String(input));
-    if (url.hostname === "graph.facebook.com" && init?.method === "POST" && url.pathname.endsWith("/feed")) {
+    if (url.hostname === "graph.facebook.com" && init?.method === "POST" && ["/feed", "/photos"].some(path => url.pathname.endsWith(path))) {
       return new Response(JSON.stringify({ id: "test-page_456" }), { status: 200 });
     }
     if (url.hostname === "graph.facebook.com" && url.searchParams.get("fields") === "permalink_url") {
@@ -131,6 +140,7 @@ test("resident consent controls advisory email delivery and admins remain utilit
       title: "Facebook link test",
       area: "Carmen",
       details: "Verify stored social post links.",
+      imageDataUrl: "data:image/png;base64,iVBORw0KGgo=",
       channels: ["facebook"],
     }, cepalcoToken);
     assert.equal(facebookAdvisory.response.status, 201);
@@ -160,6 +170,9 @@ test("resident consent controls advisory email delivery and admins remain utilit
   }, cepalcoToken);
   assert.equal(scheduled.response.status, 201);
   assert.equal(scheduled.result.publicationStatus, "scheduled");
+  assert.ok((scheduled.result.channels as string[]).includes("sms"), JSON.stringify(scheduled.result.channels));
+  assert.ok((scheduled.result.channels as string[]).includes("facebook"));
+  assert.ok((scheduled.result.channels as string[]).includes("gmail"));
   assert.equal(scheduled.result.priority, "Urgent");
   assert.equal(scheduled.result.serviceStartsAt, "2026-10-23T08:00:00.000Z");
   assert.equal(scheduled.result.estimatedRestorationAt, "2026-10-23T12:00:00.000Z");
@@ -198,17 +211,29 @@ test("resident consent controls advisory email delivery and admins remain utilit
   }
   const scheduledState = database.prepare("SELECT publication_status FROM advisories WHERE id = ?").get(scheduledId) as { publication_status: string };
   assert.equal(scheduledState.publication_status, "published");
+  const scheduledEmailCount = database.prepare("SELECT COUNT(*) AS count FROM email_deliveries WHERE advisory_id = ?")
+    .get(scheduledId) as { count: number };
+  assert.equal(scheduledEmailCount.count, 2);
   const residentId = (database.prepare("SELECT id FROM users WHERE email = ?").get("opted-in@example.test") as { id: number }).id;
+  const preservedLocation = database.prepare("SELECT address,barangay FROM users WHERE id = ?").get(residentId) as { address: string; barangay: string };
+  assert.equal(preservedLocation.address, registrationFields.address);
+  assert.equal(preservedLocation.barangay, registrationFields.barangay);
+  const optedOutResidentId = (database.prepare("SELECT id FROM users WHERE email = ?").get("not-opted-in@example.test") as { id: number }).id;
   const simulatedSmsRows = database.prepare("SELECT resident_id FROM sms_deliveries WHERE advisory_id = ?").all(scheduledId) as Array<{ resident_id: number }>;
-  assert.ok(
-    simulatedSmsRows.some(row => row.resident_id === residentId),
-    JSON.stringify({ residentId, smsRows: simulatedSmsRows, residents: database.prepare("SELECT id, email, sms_alerts FROM users WHERE role = 'resident'").all() }),
-  );
+  assert.deepEqual(simulatedSmsRows.map(row => row.resident_id), [residentId]);
+  assert.ok(!simulatedSmsRows.some(row => row.resident_id === optedOutResidentId));
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM sms_deliveries WHERE advisory_id = ? AND resident_id IN (SELECT id FROM users WHERE role != 'resident')").get(scheduledId)?.count, 0);
   const residentInbox = await jsonRequest(`${residentApi}/inbox`, "GET", undefined, optedInToken);
   assert.equal(residentInbox.response.status, 200, JSON.stringify(residentInbox.result));
   assert.ok((residentInbox.result as unknown as Array<Record<string, unknown>>).some(
     item => item.reference === scheduledReference && item.status === "Simulated",
   ), JSON.stringify(residentInbox.result));
+  const optedOutToken = optedOutRegistration.result.token as string;
+  const optedOutInbox = await jsonRequest(`${residentApi}/inbox`, "GET", undefined, optedOutToken);
+  assert.equal(optedOutInbox.response.status, 200);
+  assert.deepEqual(optedOutInbox.result, []);
+  const adminInbox = await jsonRequest(`${cepalcoApi}/inbox`, "GET", undefined, cepalcoToken);
+  assert.equal(adminInbox.response.status, 404);
   const scheduledAdminList = await jsonRequest(`${cepalcoApi}/advisories`, "GET", undefined, cepalcoToken);
   assert.ok((scheduledAdminList.result as unknown as Array<Record<string, unknown>>).some(
     item => item.id === scheduledId && item.publicationStatus === "published" &&
@@ -239,12 +264,19 @@ test("resident consent controls advisory email delivery and admins remain utilit
     area: "Carmen",
     type: "Outage",
     details: "Full announcement text and safety information.",
+    imageDataUrl: "data:image/png;base64,iVBORw0KGgo=",
   }, cepalcoToken);
   assert.equal(advisory.response.status, 201);
   const delivery = advisory.result.emailDelivery as Record<string, unknown>;
   assert.equal(delivery.status, "failed");
   assert.equal(delivery.sent, 0);
-  assert.equal(delivery.failed, 1);
+  assert.equal(delivery.failed, 2);
+  assert.deepEqual(
+    (delivery.deliveries as Array<Record<string, unknown>>).map(item => item.recipientName).sort(),
+    ["Consenting Resident", "Nonconsenting Resident"],
+  );
+  assert.ok((advisory.result.channels as string[]).includes("facebook"));
+  assert.ok((advisory.result.channels as string[]).includes("gmail"));
   const deliveryStatus = await jsonRequest(
     `${cepalcoApi}/advisories/${advisory.result.id}/email-delivery`,
     "GET",
@@ -252,8 +284,8 @@ test("resident consent controls advisory email delivery and admins remain utilit
     cepalcoToken,
   );
   assert.equal(deliveryStatus.response.status, 200);
-  assert.equal(deliveryStatus.result.failed, 1);
-  assert.equal((deliveryStatus.result.deliveries as Array<Record<string, unknown>>).length, 1);
+  assert.equal(deliveryStatus.result.failed, 2);
+  assert.equal((deliveryStatus.result.deliveries as Array<Record<string, unknown>>).length, 2);
   const retry = await jsonRequest(
     `${cepalcoApi}/advisories/${advisory.result.id}/email-delivery/retry`,
     "POST",
@@ -261,8 +293,8 @@ test("resident consent controls advisory email delivery and admins remain utilit
     cepalcoToken,
   );
   assert.equal(retry.response.status, 200);
-  assert.equal(retry.result.failed, 1);
-  assert.equal(((retry.result.deliveries as Array<Record<string, unknown>>)[0]).attempts, 2);
+  assert.equal(retry.result.failed, 2);
+  assert.ok((retry.result.deliveries as Array<Record<string, unknown>>).every(item => item.attempts === 2));
 
   const latestResidentAdvisories = await jsonRequest(`${residentApi}/advisories`);
   const listed = latestResidentAdvisories.result as unknown as Array<Record<string, unknown>>;

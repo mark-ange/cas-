@@ -65,7 +65,7 @@ export const portalSettings = {
       { icon: "pulse", title: "SMS Alert Preferences", detail: "Choose whether to opt in to text alerts when messaging is available." },
       { icon: "map", title: "Barangay-Level Updates", detail: "Relevant advisories tailored to your community." },
     ],
-    barangays: ["Agusan", "Balulang", "Bugo", "Carmen", "Gusa", "Iponan", "Kauswagan", "Lumbia", "Macabalan", "Macasandig", "Nazareth", "Patag", "Puerto"],
+    barangays: ["Carmen", "Nazareth", "Balulang"],
     districts: ["1st District", "2nd District"],
     locationDefaults: { city: "Cagayan de Oro City", postalCode: "9000" },
     filters: {
@@ -106,9 +106,6 @@ export const portalSettings = {
       { key: "incidents", label: "Active disruptions", icon: "alert" },
       { key: "scheduled", label: "Scheduled works", icon: "calendar" },
       { key: "restoration", label: "Restoration map", icon: "map" },
-      { key: "residents", label: "Resident reports", icon: "people" },
-      { key: "publish", label: "Create announcement", icon: "plus" },
-      { key: "inbox", label: "Virtual SMS inbox", icon: "messages" },
     ],
     pageTitles: {
       overview: "Operations overview",
@@ -117,7 +114,6 @@ export const portalSettings = {
       restoration: "Restoration map",
       residents: "Resident reports",
       publish: "Create announcement",
-      inbox: "Virtual SMS Inbox",
     },
     pageDescriptions: {
       overview: "Your service area status and latest verified community updates.",
@@ -126,14 +122,13 @@ export const portalSettings = {
       restoration: "Review local service activity by district.",
       residents: "Review service reports submitted by residents.",
       publish: "Enter report details, choose a location and channels, then publish now or schedule your announcement.",
-      inbox: "Review sample SMS notifications; nothing is sent to a phone.",
     },
     sidebarLabel: "CEPALCO OPERATIONS",
     pageHeadingLabel: "CEPALCO OPERATIONS",
     publishButtonLabel: "Create announcement",
     modalTitles: { advisory: "Publish service advisory", work: "Create work order" },
     filters: {
-      incidentStatuses: ["All", "Monitoring", "Under investigation", "Crew dispatched", "Resolved"],
+      incidentStatuses: ["All", "Scheduled", "Active", "Resolved", "Cancelled"],
       workStatuses: ["All scheduled", "Scheduled"],
     },
     categories: [
@@ -163,7 +158,6 @@ export const portalSettings = {
       { key: "activeDisruptions", label: "Active disruptions", icon: "alert", badge: "Critical 1" },
       { key: "scheduledWorks", label: "Scheduled this week", icon: "calendar", badge: "Queued" },
       { key: "restorationOnTime", label: "Restoration on time", icon: "pulse", value: "94%", badge: "+2.4% vs mo" },
-      { key: "residentReports", label: "Resident reports", icon: "people", badge: "All clear" },
     ],
     mapMetrics: [
       { key: "feedersOnline", label: "Feeders online", value: "98.4%", detail: "92 / 94 active", icon: "pulse" },
@@ -202,8 +196,6 @@ export const portalSettings = {
       { key: "incidents", label: "Water advisories", icon: "alert" },
       { key: "scheduled", label: "Maintenance schedule", icon: "calendar" },
       { key: "restoration", label: "Network map", icon: "map" },
-      { key: "residents", label: "Service reports", icon: "people" },
-      { key: "inbox", label: "Virtual SMS inbox", icon: "messages" },
     ],
     pageTitles: {
       overview: "Water network overview",
@@ -212,7 +204,6 @@ export const portalSettings = {
       restoration: "Water network map",
       residents: "Water service reports",
       publish: "Create announcement",
-      inbox: "Virtual SMS Inbox",
     },
     pageDescriptions: {
       overview: "Monitor water quality, pressure, advisories, and maintenance across the district.",
@@ -221,7 +212,6 @@ export const portalSettings = {
       restoration: "Review local service activity by district.",
       residents: "Review service reports submitted by residents.",
       publish: "Enter report details, choose a location and channels, then publish now or schedule your announcement.",
-      inbox: "Review sample SMS notifications; nothing is sent to a phone.",
     },
     sidebarLabel: "WATER DISTRICT OPERATIONS",
     pageHeadingLabel: "WATER DISTRICT OPERATIONS",
@@ -248,7 +238,6 @@ export const portalSettings = {
       { key: "activeAdvisories", label: "Active water advisories", icon: "water" },
       { key: "averagePressure", label: "Average network pressure", icon: "pulse" },
       { key: "scheduledMaintenance", label: "Scheduled maintenance", icon: "calendar" },
-      { key: "residentReports", label: "Resident service reports", icon: "people" },
     ],
     maps: {
       mini: [

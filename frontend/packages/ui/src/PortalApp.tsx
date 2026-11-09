@@ -18,6 +18,8 @@ import { supabaseAction } from "./supabaseActions.js";
 import "./styles.css";
 
 const portalSettings = localPortalSettings;
+const REQUIRED_ANNOUNCEMENT_CHANNELS = ["facebook", "gmail"] as const;
+const DEFAULT_ANNOUNCEMENT_CHANNELS = [...REQUIRED_ANNOUNCEMENT_CHANNELS];
 
 type EmailDeliverySummary = {
   status: string;
@@ -39,6 +41,10 @@ function settingsFor(portal: Portal): PortalSettings {
 function requiredSetting<T>(value: T | undefined, name: string): T {
   if (value === undefined) throw new Error(`Missing prototype setting: ${name}.`);
   return value;
+}
+
+function isRequiredAnnouncementChannel(channel: string): boolean {
+  return REQUIRED_ANNOUNCEMENT_CHANNELS.some(requiredChannel => requiredChannel === channel);
 }
 
 function apiBaseUrl(portal: Portal): string {
@@ -77,7 +83,7 @@ async function readAnnouncementImage(file: FormDataEntryValue | null): Promise<s
     reader.readAsDataURL(image);
   });
 
-  if (file.size <= 1_000_000) return toDataUrl(file);
+  if (file.size <= 1_000_000 && file.type === "image/jpeg") return toDataUrl(file);
 
   let bitmap: ImageBitmap;
   try {
@@ -156,7 +162,7 @@ function Icon({ name, className = "h-5 w-5" }: { name: string; className?: strin
 
 async function localAction<T>(portal: Portal, path: string, _token: string | null, options: RequestInit = {}): Promise<T> {
   const backendAction = path === "/email/gmail/status" || path === "/email/gmail/connect" ||
-    path === "/social/status" || /^\/advisories\/\d+\/email-delivery\/retry$/.test(path);
+    path === "/social/status" || path.startsWith("/advisories/recipient-estimate") || /^\/advisories\/\d+\/email-delivery\/retry$/.test(path);
   if (backendAction) {
     const headers = new Headers(options.headers);
     if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
@@ -230,6 +236,8 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
     setLocalError(copy("copy_e3b0c44298fc"));
     setPassword("");
     setConfirmPassword("");
+    const formContent = document.querySelector<HTMLElement>(".resident-auth-content");
+    if (formContent) formContent.scrollTop = 0;
   }
 
   const inputClass = "block w-full rounded-xl border border-slate-300 bg-slate-50/60 px-3.5 py-3 text-sm font-medium text-slate-900 outline-none transition placeholder:text-slate-400 hover:border-slate-400 focus:bg-white focus:border-rose-600 focus:ring-4 focus:ring-rose-500/15";
@@ -346,7 +354,7 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
         {/* Right Panel: Clean Modern Authentication Form */}
         <section className="resident-auth-form flex flex-col justify-center bg-white p-6 sm:p-10 lg:p-12 text-slate-900">
           {/* Segmented Mode Switcher */}
-          <div className="mb-6 flex rounded-xl bg-slate-100 p-1.5 ring-1 ring-slate-200/80">
+          <div className="resident-auth-mode-switcher mb-6 flex rounded-xl bg-slate-100 p-1.5 ring-1 ring-slate-200/80">
             <button
               type="button"
               onClick={() => switchMode("login")}
@@ -371,6 +379,7 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
             </button>
           </div>
 
+          <div className="resident-auth-content">
           <div className="mb-4 flex items-center justify-between">
             <p className="m-0 rounded-full bg-rose-50 px-3 py-1 text-xs font-bold tracking-wide text-rose-800">
               {mode === "register" ? copy("copy_5278b6dded60") : copy("copy_b80752d1ea40")}
@@ -511,6 +520,7 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
                         placeholder={copy("copy_43bc6228d8b4")}
                         className={`${inputClass} mt-1.5`}
                       />
+                      <small className="mt-1 block text-[11px] font-normal text-slate-500">Include your purok in this address if applicable; notices use it to refine area matching.</small>
                     </label>
 
                     <div className="grid gap-3 sm:grid-cols-[1fr_130px]">
@@ -640,6 +650,12 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
                     <span>
                       {copy("copy_bdb74034a9d2")}
                       <strong className="text-rose-700 ml-1">{copy("copy_add882140045")}</strong>
+                      <details className="mt-2 rounded-lg border border-slate-200 bg-white p-2.5 text-[11px] leading-5">
+                        <summary className="cursor-pointer font-semibold text-slate-700">Read the Terms and Conditions</summary>
+                        <p className="mb-1 mt-2">CivicAlert provides water and electricity interruption notices and related resident services. Keep your contact details and service address accurate so notices can be matched to your area.</p>
+                        <p className="mb-1">Your email is used for advisory notifications. Your mobile number is used only to create simulated SMS records in this system; no text message is sent. Announcements may also be published on the responsible utility provider’s official social media accounts.</p>
+                        <p className="mb-0">Use the system lawfully and provide accurate information. CivicAlert shares service information and does not replace the utility provider’s official authority. Your acceptance time is recorded with your account.</p>
+                      </details>
                     </span>
                   </label>
 
@@ -648,13 +664,7 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
                     <span>{copy("copy_e2d06d28e9c3")}</span>
                   </label>
 
-                  <label className="flex items-start gap-2.5 text-xs text-slate-700 cursor-pointer">
-                    <input name="immediateEmailAlerts" type="checkbox" className="mt-0.5 h-4 w-4 rounded accent-rose-600" />
-                    <span>
-                      <strong className="block font-semibold text-slate-900">{copy("immediateEmailAlertsTitle")}</strong>
-                      <span className="text-slate-500 text-[11px]">{copy("immediateEmailAlertsInfo")}</span>
-                    </span>
-                  </label>
+                  <p className="m-0 pl-6 text-slate-500 text-[11px]">{copy("mandatoryAdvisoryEmailInfo")}</p>
                 </div>
 
                 <button
@@ -678,6 +688,7 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
               </p>
             </>
           )}
+          </div>
         </section>
       </div>
     </section>
@@ -789,15 +800,14 @@ function App({ portal }: { portal: Portal }) {
         ]);
         setItems({ advisories, reports: [], workOrders, network: [] });
       } else {
-        const [advisories, workOrders, reports, network] = await Promise.all([
+        const [advisories, workOrders, network] = await Promise.all([
           localAction<Advisory[]>(portal, "/advisories", token),
           localAction<WorkOrder[]>(portal, "/work-orders", token),
-          localAction<ServiceReport[]>(portal, "/reports", token),
           portal === "water" ? localAction<NetworkReading[]>(portal, "/network", token) : Promise.resolve([]),
         ]);
-        setItems({ advisories, workOrders, reports, network });
+        setItems({ advisories, workOrders, reports: [], network });
       }
-      setInbox(await localAction<SMSRecord[]>(portal, "/inbox", token));
+      setInbox(isResident ? await localAction<SMSRecord[]>(portal, "/inbox", token) : []);
       setError(copy("copy_e3b0c44298fc"));
     } catch (err) {
       setError(err instanceof Error ? err.message : copy("copy_e583d95bd720"));
@@ -836,7 +846,6 @@ function App({ portal }: { portal: Portal }) {
         postalCode: data.get("postalCode"),
         termsAccepted: data.get("termsAccepted") === "on",
         smsAlerts: data.get("smsAlerts") === "on",
-        immediateEmailAlerts: data.get("immediateEmailAlerts") === "on",
       }) });
       localStorage.setItem(`civicalert:${portal}:account`, response.token);
       setActor(response.actor); setToken(response.token);
@@ -892,14 +901,28 @@ function App({ portal }: { portal: Portal }) {
     const form = new FormData(event.currentTarget);
     try {
       const imageDataUrl = await readAnnouncementImage(form.get("announcementImage"));
-      const selectedChannels = form.getAll("channels").map(String);
+      const selectedChannels = [...new Set([
+        ...form.getAll("channels").map(String),
+        ...REQUIRED_ANNOUNCEMENT_CHANNELS,
+      ])];
       if (selectedChannels.length === 0) {
         throw new Error("Select at least one announcement channel.");
       }
-      if (selectedChannels.includes("instagram") && !imageDataUrl) {
-        throw new Error("Add an announcement image before selecting Instagram.");
+      if (selectedChannels.some(channel => ["facebook", "instagram", "gmail"].includes(channel)) && !imageDataUrl) {
+        throw new Error("Add an announcement image before publishing to Facebook, Instagram, or Gmail.");
       }
+      const area = String(form.get("area") || "");
+      const estimate = await localAction<{ emailRecipients: number; smsRecipients: number }>(portal, `/advisories/recipient-estimate?area=${encodeURIComponent(area)}`, token);
       const scheduledAtInput = String(form.get("scheduledAt") || "");
+      const publishTime = scheduledAtInput ? `Scheduled for ${formatResidentDateTime(new Date(scheduledAtInput).toISOString())}` : "Publish immediately";
+      const audience = [
+        selectedChannels.includes("gmail") ? `Gmail: ${estimate.emailRecipients} resident accounts` : null,
+        selectedChannels.includes("sms") ? `Simulated SMS inbox: ${estimate.smsRecipients} residents with a phone number and SMS enabled` : null,
+        selectedChannels.includes("facebook") ? "Facebook: official utility page" : null,
+        selectedChannels.includes("instagram") ? "Instagram: official utility account" : null,
+      ].filter(Boolean).join("\n");
+      const preview = `Review ${portal === "water" ? "Water District" : "CEPALCO"} advisory\n\n${String(form.get("title") || "(No headline)")}\nAffected barangays / puroks: ${area || "(None listed)"}\n\n${String(form.get("details") || "")}\n\n${publishTime}\nMatched recipients and channels:\n${audience}\n\nConfirm to save and publish this advisory.`;
+      if (!window.confirm(preview)) return;
       const published = await localAction<{
         id: number;
         scheduledAt: string | null;
@@ -938,7 +961,7 @@ function App({ portal }: { portal: Portal }) {
         const deliveryResults: string[] = [];
         if (selectedChannels.includes("gmail")) {
           const summary = published.emailDelivery;
-          deliveryResults.push(`Gmail: ${summary?.sent ? `${summary.sent} sent${summary.failed ? `, ${summary.failed} failed` : ""}` : summary?.failed ? `${summary.failed} failed` : summary?.status === "no_recipients" ? "no opted-in recipients" : "not sent"}`);
+          deliveryResults.push(`Gmail: ${summary?.sent ? `${summary.sent} sent${summary.failed ? `, ${summary.failed} failed` : ""}` : summary?.failed ? `${summary.failed} failed` : summary?.status === "no_recipients" ? "no resident accounts" : "not sent"}`);
         }
         for (const platform of published.socialDelivery?.platforms ?? []) {
           deliveryResults.push(`${platform.platform}: ${platform.status}${platform.permalinkUrl ? ` — ${platform.permalinkUrl}` : ""}${platform.message ? ` (${platform.message})` : ""}`);
@@ -961,7 +984,7 @@ function App({ portal }: { portal: Portal }) {
   }
 
   async function updateAdvisoryStatus(item: Advisory) {
-    const nextStatus: Status = item.status === "Under investigation" ? "Crew dispatched" : item.status === "Crew dispatched" ? "Resolved" : "Under investigation";
+    const nextStatus: Status = item.status === "Scheduled" ? "Active" : item.status === "Active" ? "Resolved" : item.status === "Resolved" ? "Cancelled" : "Active";
     setError(copy("copy_e3b0c44298fc"));
     try {
       await localAction(portal, `/advisories/${item.id}/status`, token, {
@@ -1013,7 +1036,6 @@ function App({ portal }: { portal: Portal }) {
           smsAlerts: form.get("smsAlerts") === "on",
           maintenanceAlerts: form.get("maintenanceAlerts") === "on",
           emailDigest: form.get("emailDigest") === "on",
-          immediateEmailAlerts: form.get("immediateEmailAlerts") === "on",
           profileImage: profileImage === null ? actor.profileImage ?? null : profileImage || null,
         }),
       });
@@ -1064,7 +1086,7 @@ function App({ portal }: { portal: Portal }) {
   const nav = settingsFor(portal).navigation;
   const advisories = items.advisories;
   const activeAdvisories = advisories.filter(item =>
-    !["Resolved", "Operational"].includes(item.status) &&
+    !["Resolved", "Cancelled", "Operational"].includes(item.status) &&
     (item.publicationStatus === undefined || item.publicationStatus === "published"));
   const currentSettings = settingsFor(portal);
   const mainTitle = currentSettings.pageTitles[page] || currentSettings.pageTitles.overview;
@@ -1094,13 +1116,13 @@ function App({ portal }: { portal: Portal }) {
           {publishedDelivery.summary.failed > 0 && <button type="button" onClick={() => void retryFailedEmails()} disabled={retryingEmail} className="rounded-md border border-current px-3 py-2 text-xs font-semibold disabled:opacity-60">{retryingEmail ? "Retrying…" : "Retry failed email(s)"}</button>}
         </div>}
         {loading && <div className="mb-4 h-1 overflow-hidden rounded-full bg-slate-200"><div className="h-full w-1/3 animate-pulse bg-[var(--brand)]" /></div>}
-        {page === "overview" ? <Overview portal={portal} actor={actor} advisories={activeAdvisories} workOrders={items.workOrders} reports={items.reports} network={items.network} onNavigate={navigate} onAction={kind => kind === "advisory" && !isResident ? navigate("publish") : setModal(kind)} /> : page === "inbox" ? <VirtualInbox messages={inbox} onRead={async message => { await localAction(portal, `/inbox/${message.id}/read`, token, { method: "PATCH" }); await loadWorkspace(); }} /> : page === "profile" && isResident ? <ResidentProfile actor={actor} selectedImage={profileImage} saving={busy} onImageChange={setProfileImage} onSave={saveProfile} onPasswordChange={updatePassword} /> : page === "advisories" && isResident ? <ResidentAdvisories items={items.advisories} workOrders={items.workOrders} /> : (portal === "cepalco" || portal === "water") && page === "publish" ? portal === "water" ? <WaterPublishForm busy={busy} token={token} onCancel={() => navigate("overview")} onSubmit={publishAnnouncement} /> : <AnnouncementComposer portal={portal} busy={busy} token={token} onCancel={() => navigate("overview")} onSubmit={publishAnnouncement} /> : portal === "cepalco" && page === "incidents" ? <CepalcoDisruptions items={advisories} onPublish={() => navigate("publish")} onStatusUpdate={updateAdvisoryStatus} /> : portal === "cepalco" && page === "scheduled" ? <CepalcoSchedule workOrders={items.workOrders} onCreate={() => setModal("work")} onPublish={() => navigate("publish")} /> : portal === "water" && page === "incidents" ? <WaterAdvisories items={items.advisories} onPublish={() => navigate("publish")} /> : (portal === "water" || portal === "cepalco") && page === "residents" ? <WaterReports reports={items.reports} onStatusUpdate={updateReportStatus} /> : portal === "water" && page === "scheduled" ? <WaterSchedule items={items.workOrders} onCreate={() => setModal("work")} /> : portal === "cepalco" && page === "restoration" ? <CepalcoRestorationMap advisories={advisories} /> : page === "restoration" ? <Network portal={portal} advisories={advisories} network={items.network} /> : page === "services" ? <Services advisories={items.advisories} /> : <section className="space-y-4">
+        {page === "overview" ? <Overview portal={portal} actor={actor} advisories={activeAdvisories} workOrders={items.workOrders} network={items.network} onNavigate={navigate} onAction={kind => kind === "advisory" && !isResident ? navigate("publish") : setModal(kind)} /> : isResident && page === "inbox" ? <VirtualInbox messages={inbox} onRead={async message => { await localAction(portal, `/inbox/${message.id}/read`, token, { method: "PATCH" }); await loadWorkspace(); }} /> : page === "profile" && isResident ? <ResidentProfile actor={actor} selectedImage={profileImage} saving={busy} onImageChange={setProfileImage} onSave={saveProfile} onPasswordChange={updatePassword} /> : page === "advisories" && isResident ? <ResidentAdvisories items={items.advisories} workOrders={items.workOrders} actor={actor} /> : (portal === "cepalco" || portal === "water") && page === "publish" ? portal === "water" ? <WaterPublishForm busy={busy} token={token} onCancel={() => navigate("overview")} onSubmit={publishAnnouncement} /> : <AnnouncementComposer portal={portal} busy={busy} token={token} onCancel={() => navigate("overview")} onSubmit={publishAnnouncement} /> : portal === "cepalco" && page === "incidents" ? <CepalcoDisruptions items={items.advisories} token={token} onStatusUpdate={updateAdvisoryStatus} /> : portal === "cepalco" && page === "scheduled" ? <CepalcoSchedule workOrders={items.workOrders} onCreate={() => setModal("work")} /> : portal === "water" && page === "incidents" ? <WaterAdvisories items={items.advisories} token={token} onStatusUpdate={updateAdvisoryStatus} /> : portal === "water" && page === "scheduled" ? <WaterSchedule items={items.workOrders} onCreate={() => setModal("work")} /> : portal === "cepalco" && page === "restoration" ? <CepalcoRestorationMap advisories={advisories} /> : page === "restoration" ? <Network portal={portal} advisories={advisories} network={items.network} /> : page === "services" ? <Services advisories={items.advisories} /> : <section className="space-y-4">
           {page === "incidents" && <div className="flex flex-wrap items-center justify-between gap-3"><label className="flex min-w-[230px] flex-1 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-slate-400"><Icon name="search" className="h-4 w-4" /><input className="w-full border-0 bg-transparent text-xs text-slate-800 outline-none" placeholder={copy("copy_7145ac5f783f")} onChange={event => document.querySelectorAll<HTMLElement>("[data-search-item]").forEach(card => { card.hidden = !card.innerText.toLowerCase().includes(event.target.value.toLowerCase()); })} /></label>{!isResident && <button onClick={() => setModal("advisory")} className="rounded-lg bg-[var(--brand)] px-4 py-2.5 text-xs font-bold text-white">{copy("copy_dd425feef83c")}{newButton}</button>}</div>}
           <div className="grid gap-3 xl:grid-cols-2">{sectionItems.map(item => <DataCard key={item.id} item={item} page={page} />)}{sectionItems.length === 0 && <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500">{copy("copy_9b2835326f52")}</div>}</div>
         </section>}
       </section>
     </div>
-    {toast && <div role={toast.startsWith("Announcement saved.") && /failed|not_configured|no opted-in|no text was sent|not sent/i.test(toast) ? "alert" : "status"} className={`fixed bottom-5 right-5 z-40 rounded-lg px-4 py-3 text-sm font-medium text-white shadow-xl ${toast.startsWith("Announcement saved.") && /failed|not_configured|no opted-in|no text was sent|not sent/i.test(toast) ? "bg-amber-800" : "bg-emerald-900"}`}>{toast}</div>}
+    {toast && <div role={toast.startsWith("Announcement saved.") && /failed|not_configured|no resident accounts|no text was sent|not sent/i.test(toast) ? "alert" : "status"} className={`fixed bottom-5 right-5 z-40 rounded-lg px-4 py-3 text-sm font-medium text-white shadow-xl ${toast.startsWith("Announcement saved.") && /failed|not_configured|no resident accounts|no text was sent|not sent/i.test(toast) ? "bg-amber-800" : "bg-emerald-900"}`}>{toast}</div>}
     {modal && <RecordModal portal={portal} kind={modal} onClose={() => setModal(null)} onSubmit={submitRecord} />}
   </main>;
 }
@@ -1131,45 +1153,45 @@ function ResidentProfile({ actor, selectedImage, saving, onImageChange, onSave, 
     anchor.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
-  const fieldClass = "mt-1.5 block w-full rounded-md border border-[#ded6d3] bg-[#fffdfc] px-3 py-2.5 text-[10px] font-normal text-slate-800 outline-none focus:border-[#64234f]";
-  const labelClass = "block text-[9px] font-semibold text-slate-700";
-  return <div className="resident-profile-page space-y-3">
-    <article className="resident-profile-card flex flex-wrap items-center gap-4 rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
-      {image ? <img src={image} alt={`${actor.name} profile`} className="h-16 w-16 rounded-full border border-slate-200 object-cover" /> : <span className="avatar grid h-16 w-16 place-items-center rounded-full bg-rose-50 text-lg font-bold text-rose-700">{actor.name.split(" ").map(part => part[0]).slice(0, 2).join("").toUpperCase()}</span>}
-      <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><strong className="text-sm text-slate-900">{actor.name}</strong><span className="rounded-full bg-emerald-50 px-2 py-1 text-[8px] font-bold text-emerald-800">{copy("copy_39882d1ad5ec")}</span></div><p className="mb-0 mt-1 text-[9px] text-slate-500">{actor.barangay || "Barangay not set"}{actor.district ? ` · ${actor.district}` : ""} {copy("copy_6e01f78b9eb4")}{actor.city || "Cagayan de Oro City"}</p><p className="mb-0 mt-1 text-[8px] text-slate-400">{copy("copy_cbbd7f35fdea")}{actor.email}</p></div>
-      <div className="flex flex-wrap gap-2"><label className="cursor-pointer rounded-md border border-slate-200 px-3 py-2 text-[8px] font-semibold text-slate-700 hover:bg-slate-50">{copy("copy_c5fbcb8b00ea")}<input type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={event => selectImage(event.currentTarget.files?.[0])} /></label>{image && <button type="button" onClick={() => { onImageChange(""); setImageError(""); }} className="rounded-md border border-slate-200 px-3 py-2 text-[8px] font-semibold text-slate-600">{copy("copy_c3812fc4acb8")}</button>}</div>
-      {imageError && <p role="alert" className="w-full text-[9px] text-rose-700">{imageError}</p>}
+  const fieldClass = "mt-1.5 block w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-normal text-slate-800 outline-none focus:border-[#64234f] focus:ring-2 focus:ring-[#64234f]/15 shadow-sm transition-all";
+  const labelClass = "block text-xs font-semibold text-slate-700";
+  return <div className="resident-profile-page space-y-4">
+    <article className="resident-profile-card flex flex-wrap items-center gap-4 rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm">
+      {image ? <img src={image} alt={`${actor.name} profile`} className="h-16 w-16 rounded-full border border-slate-200 object-cover shadow-sm" /> : <span className="avatar grid h-16 w-16 place-items-center rounded-full bg-rose-50 text-xl font-bold text-rose-700 shadow-sm">{actor.name.split(" ").map(part => part[0]).slice(0, 2).join("").toUpperCase()}</span>}
+      <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><strong className="text-base font-bold text-slate-900">{actor.name}</strong><span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-bold text-emerald-800">{copy("copy_39882d1ad5ec")}</span></div><p className="mb-0 mt-1 text-xs text-slate-500">{actor.barangay || "Barangay not set"}{actor.district ? ` · ${actor.district}` : ""} {copy("copy_6e01f78b9eb4")}{actor.city || "Cagayan de Oro City"}</p><p className="mb-0 mt-1 text-xs text-slate-400">{copy("copy_cbbd7f35fdea")}{actor.email}</p></div>
+      <div className="flex flex-wrap gap-2"><label className="cursor-pointer rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 shadow-sm transition-colors">{copy("copy_c5fbcb8b00ea")}<input type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={event => selectImage(event.currentTarget.files?.[0])} /></label>{image && <button type="button" onClick={() => { onImageChange(""); setImageError(""); }} className="rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 shadow-sm transition-colors">{copy("copy_c3812fc4acb8")}</button>}</div>
+      {imageError && <p role="alert" className="w-full text-xs font-medium text-rose-700">{imageError}</p>}
     </article>
 
-    <form onSubmit={onSave} className="space-y-3">
-      <article className="resident-profile-card rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
-        <h2 className="mb-3 mt-0 text-[11px] font-bold text-slate-900">{copy("copy_3a8867786365")}</h2>
-        <div className="grid gap-3 sm:grid-cols-2">
+    <form onSubmit={onSave} className="space-y-4">
+      <article className="resident-profile-card rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm">
+        <h2 className="mb-4 mt-0 text-base font-bold text-slate-900">{copy("copy_3a8867786365")}</h2>
+        <div className="grid gap-4 sm:grid-cols-2">
           <label className={labelClass}>{copy("copy_f603e86165b0")}<input name="name" required maxLength={120} defaultValue={actor.name} autoComplete="name" className={fieldClass} /></label>
           <label className={labelClass}>{copy("copy_09bf25ef3083")}<input name="email" type="email" required defaultValue={actor.email} autoComplete="email" className={fieldClass} /></label>
           <label className={labelClass}>{copy("copy_ba148fbc44de")}<input name="phoneNumber" type="tel" maxLength={40} defaultValue={actor.phoneNumber || ""} autoComplete="tel" className={fieldClass} /></label>
-          <label className={labelClass}>{copy("copy_e7cf3ef4f17c")}<input type="password" value={copy("copy_6becb7727529")} readOnly className={`${fieldClass} bg-slate-50`} /><span className="mt-1 block text-[8px] font-normal text-slate-400">{copy("copy_9b9e587044c6")}</span></label>
+          <label className={labelClass}>{copy("copy_e7cf3ef4f17c")}<input type="password" value={copy("copy_6becb7727529")} readOnly className={`${fieldClass} bg-slate-50`} /><span className="mt-1 block text-xs font-normal text-slate-400">{copy("copy_9b9e587044c6")}</span></label>
         </div>
       </article>
-      <article className="resident-profile-card rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
-        <div className="mb-3 flex items-center justify-between gap-2"><h2 className="m-0 text-[11px] font-bold text-slate-900">{copy("copy_6f9f42ba937e")}</h2><span className="rounded-full bg-violet-50 px-2 py-1 text-[8px] font-bold text-violet-700">{copy("copy_8a59897bdc1a")}</span></div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className={`${labelClass} sm:col-span-2`}>{copy("copy_432d86cc06aa")}<input name="address" maxLength={240} defaultValue={actor.address || ""} autoComplete="street-address" className={fieldClass} /></label>
+      <article className="resident-profile-card rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm">
+        <div className="mb-4 flex items-center justify-between gap-2"><h2 className="m-0 text-base font-bold text-slate-900">{copy("copy_6f9f42ba937e")}</h2><span className="rounded-full bg-violet-50 px-2.5 py-0.5 text-xs font-bold text-violet-700">{copy("copy_8a59897bdc1a")}</span></div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className={`${labelClass} sm:col-span-2`}>{copy("copy_432d86cc06aa")}<input name="address" maxLength={240} defaultValue={actor.address || ""} autoComplete="street-address" className={fieldClass} /><span className="mt-1 block text-xs font-normal text-slate-500">Include your purok in this address if applicable; notices use it to refine area matching.</span></label>
           <label className={labelClass}>{copy("copy_ad1315f3e999")}<input name="barangay" list="profile-barangays" maxLength={100} defaultValue={actor.barangay || ""} autoComplete="address-level3" className={fieldClass} /><datalist id="profile-barangays">{requiredSetting(settingsFor("resident").barangays, "resident.barangays").map(name => <option key={name} value={name} />)}</datalist></label>
           <label className={labelClass}>{copy("copy_ac3506fe618c")}<input name="postalCode" maxLength={20} defaultValue={actor.postalCode || ""} autoComplete="postal-code" className={fieldClass} /></label>
           <label className={labelClass}>{copy("copy_c4473f4e49d0")}<input name="district" maxLength={80} defaultValue={actor.district || ""} className={fieldClass} /></label>
           <label className={labelClass}>{copy("copy_1f15f6d9f6b5")}<input name="city" maxLength={100} defaultValue={actor.city || ""} autoComplete="address-level2" className={fieldClass} /></label>
         </div>
       </article>
-      <article className="resident-profile-card rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
-        <div className="mb-3"><h2 className="m-0 text-[11px] font-bold text-slate-900">{copy("copy_327f37078430")}</h2><p className="mb-0 mt-1 text-[8px] text-slate-500">{copy("copy_1b1d2a642be6")}</p></div>
+      <article className="resident-profile-card rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm">
+        <div className="mb-4"><h2 className="m-0 text-base font-bold text-slate-900">{copy("copy_327f37078430")}</h2><p className="mb-0 mt-1 text-xs text-slate-500">{copy("copy_1b1d2a642be6")}</p></div>
         <ProfilePreference name="smsAlerts" checked={actor.smsAlerts ?? true} title={copy("copy_ab3dd828aa41")} description={copy("copy_abe5bf56e7fd")} />
         <ProfilePreference name="maintenanceAlerts" checked={actor.maintenanceAlerts ?? true} title={copy("copy_c1d8fd5aca7b")} description={copy("copy_c59d87c00621")} />
         <ProfilePreference name="emailDigest" checked={actor.emailDigest ?? true} title={copy("copy_70c407729c22")} description={copy("copy_379b43036c4a")} />
-        <ProfilePreference name="immediateEmailAlerts" checked={actor.immediateEmailAlerts ?? false} title={copy("immediateEmailAlertsTitle")} description={copy("immediateEmailAlertsInfo")} />
-        <p className="mb-0 mt-3 text-[8px] text-slate-400">{copy("copy_516efbeb02d9")}</p>
+        <p className="mb-0 mt-3 text-xs text-slate-500">{copy("mandatoryAdvisoryEmailInfo")}</p>
+        <p className="mb-0 mt-2 text-xs text-slate-400">{copy("copy_516efbeb02d9")}</p>
       </article>
-      <div className="flex justify-end"><button disabled={saving} className="rounded-lg bg-[#64234f] px-5 py-2.5 text-[9px] font-bold text-white disabled:opacity-60">{saving ? copy("copy_395207583eb8") : copy("copy_1964f29935ed")}</button></div>
+      <div className="flex justify-end"><button disabled={saving} className="rounded-xl bg-[#64234f] px-6 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-[#521c40] disabled:opacity-60 transition-colors">{saving ? copy("copy_395207583eb8") : copy("copy_1964f29935ed")}</button></div>
     </form>
 
     <article className="resident-profile-card rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
@@ -1279,17 +1301,18 @@ function SocialConnectionStatus({ portal, token }: { portal: "cepalco" | "water"
   if (error) return <p role="alert" className="mb-0 text-xs text-rose-700">{error}</p>;
   if (!status) return <p className="mb-0 text-xs text-slate-500">Checking social publishing setup…</p>;
   return <p className="mb-0 text-xs text-slate-600">
-    Facebook: <strong className={status.facebook ? "text-emerald-700" : "text-amber-700"}>{status.facebook ? "connected" : "server setup required"}</strong>
+    Facebook: <strong className={status.facebook ? "text-emerald-700" : "text-amber-700"}>{status.facebook ? "configured" : "server setup required"}</strong>
     {" · "}
-    Instagram: <strong className={status.instagram ? "text-emerald-700" : "text-amber-700"}>{status.instagram ? "connected" : "server setup required"}</strong>
+    Instagram: <strong className={status.instagram ? "text-emerald-700" : "text-amber-700"}>{status.instagram ? "configured" : "server setup required"}</strong>
+    {" · Meta checks token validity when publishing"}
   </p>;
 }
 
-function Overview({ portal, actor, advisories, workOrders, reports, network, onNavigate, onAction }: { portal: Portal; actor: Actor; advisories: Advisory[]; workOrders: WorkOrder[]; reports: ServiceReport[]; network: NetworkReading[]; onNavigate: (page: string) => void; onAction: (modal: "advisory" | "work") => void }) {
+function Overview({ portal, actor, advisories, workOrders, network, onNavigate, onAction }: { portal: Portal; actor: Actor; advisories: Advisory[]; workOrders: WorkOrder[]; network: NetworkReading[]; onNavigate: (page: string) => void; onAction: (modal: "advisory" | "work") => void }) {
   const water = portal === "water";
   const resident = portal === "resident";
   if (resident) return <ResidentOverview actor={actor} advisories={advisories} onNavigate={onNavigate} />;
-  if (portal === "cepalco") return <CepalcoOverview advisories={advisories} workOrders={workOrders} reports={reports} onNavigate={onNavigate} onPublish={() => onNavigate("publish")} onCreateWork={() => onAction("work")} />;
+  if (portal === "cepalco") return <CepalcoOverview advisories={advisories} workOrders={workOrders} onNavigate={onNavigate} onPublish={() => onNavigate("publish")} onCreateWork={() => onAction("work")} />;
   const averagePressure = network.length
     ? Math.round(network.reduce((sum, reading) => sum + reading.pressurePsi, 0) / network.length)
     : 0;
@@ -1300,7 +1323,7 @@ function Overview({ portal, actor, advisories, workOrders, reports, network, onN
         ? `${averagePressure} PSI`
         : metric.key === "scheduledMaintenance"
           ? String(workOrders.length).padStart(2, "0")
-          : String(reports.length).padStart(2, "0");
+          : metric.value ?? "—";
     return { ...metric, value };
   });
   return <div className={`space-y-4 ${water ? "water-overview" : ""}`}>
@@ -1314,26 +1337,24 @@ function Overview({ portal, actor, advisories, workOrders, reports, network, onN
       <div className="space-y-4">
         <article className="rounded-xl border border-slate-200 bg-white p-5"><div className="mb-4 flex items-center justify-between"><h2 className="m-0 text-sm font-bold text-slate-900">{water ? copy("copy_928d553c98de") : copy("copy_ed4be26c08f6")}</h2><span className="rounded-full bg-emerald-50 px-2 py-1 text-[9px] font-bold text-emerald-800">{copy("copy_9001b9c1ea3e")}</span></div><div className="space-y-3 text-xs"><HealthLine icon={water ? "drop" : "pulse"} label={water ? copy("copy_7a4d86e0b15e") : copy("copy_db2147de64b9")} value={copy("copy_996bf57d15be")} /><HealthLine icon="pulse" label={water ? copy("copy_0e7cd2979907") : copy("copy_4c82d70632f5")} value={water ? `${Math.round(network.reduce((sum, reading) => sum + reading.pressurePsi, 0) / Math.max(1, network.length))} PSI` : copy("copy_a5f0bab62ab7")} /><HealthLine icon="shield" label={water ? copy("copy_04a3d80a1962") : copy("copy_1b9c0ef8f022")} value={water ? copy("copy_d8ce14bfa8c0") : copy("copy_c4ff20ed5c92")} /></div>{water && <div className="mt-4 border-t border-slate-100 pt-4"><div className="mb-2 flex justify-between text-[10px] text-slate-500"><span>{copy("copy_0e2cc5230bce")}</span><strong className="text-slate-800">{network[0]?.reservoirPercent ?? "—"}{copy("copy_bbf3f11cb5b4")}</strong></div><div className="h-1.5 overflow-hidden rounded-full bg-slate-100"><span className="progress-fill block h-full rounded-full" style={{ width: `${network[0]?.reservoirPercent ?? 0}%` }} /></div><p className="mb-0 mt-2 text-[9px] text-slate-400">{copy("copy_f088839faf2b")}</p></div>}</article>
         <article className="rounded-xl border border-slate-200 bg-white p-5"><div className="mb-3 flex items-center justify-between"><h2 className="m-0 text-sm font-bold text-slate-900">{water ? copy("copy_0183aa6e0b13") : copy("copy_48841e6cc7b0")}</h2><button onClick={() => onNavigate("restoration")} className="text-[10px] font-bold text-[var(--brand)]">{copy("copy_ea488d2693df")}</button></div><MiniMap water={water} /><div className="mt-3 flex gap-3 text-[9px] text-slate-500"><span>{copy("copy_a336ed94f116")}</span><span className="text-amber-700">{copy("copy_8ee132327af2")}</span></div></article>
-        <article className="rounded-xl border border-slate-200 bg-white p-5"><h2 className="mb-3 mt-0 text-sm font-bold text-slate-900">{copy("copy_1810407f5ab7")}</h2><div className="space-y-2">{!resident && <ActionButton icon="plus" label={water ? copy("copy_dd4c1e0f180b") : copy("copy_c48c20a1939c")} onClick={() => water ? onNavigate("publish") : onAction("advisory")} />}{!resident && <ActionButton icon="calendar" label={water ? copy("copy_264bf4916de8") : copy("copy_7edcd3387306")} onClick={() => onAction("work")} />}{!resident && <ActionButton icon="people" label={water ? copy("copy_b0e9e661b4a1") : copy("copy_9b0fdc1f0d81")} onClick={() => onNavigate("residents")} />}</div></article>
+        <article className="rounded-xl border border-slate-200 bg-white p-5"><h2 className="mb-3 mt-0 text-sm font-bold text-slate-900">{copy("copy_1810407f5ab7")}</h2><div className="space-y-2">{!resident && <ActionButton icon="plus" label={water ? copy("copy_dd4c1e0f180b") : copy("copy_c48c20a1939c")} onClick={() => water ? onNavigate("publish") : onAction("advisory")} />}{!resident && <ActionButton icon="calendar" label={water ? copy("copy_264bf4916de8") : copy("copy_7edcd3387306")} onClick={() => onAction("work")} />}</div></article>
         {water && <p className="rounded-lg bg-amber-50 p-3 text-[10px] leading-5 text-amber-900"><strong>{copy("copy_99499f2400eb")}</strong> {copy("copy_fa187e246369")}</p>}
       </div>
     </section>
   </div>;
 }
 
-function CepalcoOverview({ advisories, workOrders, reports, onNavigate, onPublish, onCreateWork }: { advisories: Advisory[]; workOrders: WorkOrder[]; reports: ServiceReport[]; onNavigate: (page: string) => void; onPublish: () => void; onCreateWork: () => void }) {
-  const highlighted = advisories.find(item => item.status !== "Resolved") || advisories[0];
+function CepalcoOverview({ advisories, workOrders, onNavigate, onPublish, onCreateWork }: { advisories: Advisory[]; workOrders: WorkOrder[]; onNavigate: (page: string) => void; onPublish: () => void; onCreateWork: () => void }) {
+  const highlighted = advisories.find(item => !["Resolved", "Cancelled"].includes(item.status)) || advisories[0];
   const metrics = requiredSetting(settingsFor("cepalco").metrics, "cepalco.metrics").map(metric => ({
     ...metric,
     value: metric.key === "activeDisruptions"
-      ? String(advisories.filter(item => item.status !== "Resolved").length).padStart(2, "0")
+      ? String(advisories.filter(item => !["Resolved", "Cancelled"].includes(item.status)).length).padStart(2, "0")
       : metric.key === "scheduledWorks"
         ? String(workOrders.length).padStart(2, "0")
-        : metric.key === "residentReports"
-          ? String(reports.length).padStart(2, "0")
-          : metric.value,
+        : metric.value,
   }));
-  return <div className="cepalco-overview">
+  return <div className="cepalco-overview admin-page-stack">
     <section className="cepalco-metrics grid grid-cols-2 gap-3 xl:grid-cols-4">{metrics.map(metric => <article key={metric.label} className="cepalco-card flex items-start justify-between gap-2 rounded-lg border bg-white p-3"><div><span className="cepalco-metric-icon"><Icon name={metric.icon} className="h-4 w-4" /></span><strong className="mt-1 block text-xl font-extrabold text-slate-900">{metric.value}</strong><span className="block text-[9px] text-slate-500">{metric.label}</span></div><span className="cepalco-pill">{metric.badge}</span></article>)}</section>
     <section className="cepalco-dashboard-grid mt-3 grid items-start gap-3 xl:grid-cols-[minmax(0,1fr)_290px]">
       <div className="space-y-3">
@@ -1357,7 +1378,7 @@ function CepalcoOverview({ advisories, workOrders, reports, onNavigate, onPublis
           <CepalcoMiniMap />
           <div className="mt-2 flex flex-wrap gap-3 text-[8px] text-slate-600"><span>{copy("copy_a336ed94f116")}</span><span className="text-amber-700">{copy("copy_8ee132327af2")}</span><span className="text-teal-800">{copy("copy_be3a7d07de78")}</span></div>
         </article>
-        <article className="cepalco-card rounded-lg border bg-white p-3"><h2 className="mb-2 mt-0 text-xs font-bold text-slate-900">{copy("copy_1810407f5ab7")}</h2><div className="space-y-1.5"><ActionButton icon="plus" label={copy("copy_c48c20a1939c")} onClick={onPublish} /><ActionButton icon="calendar" label={copy("copy_7edcd3387306")} onClick={onCreateWork} /><ActionButton icon="people" label={copy("copy_9b0fdc1f0d81")} onClick={() => onNavigate("residents")} /></div></article>
+        <article className="cepalco-card rounded-lg border bg-white p-3"><h2 className="mb-2 mt-0 text-xs font-bold text-slate-900">{copy("copy_1810407f5ab7")}</h2><div className="space-y-1.5"><ActionButton icon="plus" label={copy("copy_c48c20a1939c")} onClick={onPublish} /><ActionButton icon="calendar" label={copy("copy_7edcd3387306")} onClick={onCreateWork} /></div></article>
       </div>
     </section>
   </div>;
@@ -1370,13 +1391,15 @@ function CepalcoWorkTable({ items }: { items: WorkOrder[] }) {
 
 function CepalcoIncidentCard({ item, compact = false, onStatusUpdate }: { item: Advisory; compact?: boolean; onStatusUpdate?: (item: Advisory) => void }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const statusStyle = item.status === "Resolved" ? "resolved" : item.status === "Under investigation" ? "investigating" : "dispatch";
+  const statusStyle = item.status === "Resolved" ? "resolved" : item.status === "Cancelled" ? "cancelled" : item.status === "Scheduled" ? "scheduled" : "dispatch";
   const imageUrl = announcementImageUrl(item, "cepalco");
   return <article className={`cepalco-incident-card ${compact ? "compact" : ""}`}>
-    <div className="flex flex-wrap items-center justify-between gap-2"><span className={`cepalco-status ${statusStyle}`}>{item.publicationStatus === "scheduled" ? "Scheduled" : item.publicationStatus === "failed" ? "Publishing failed" : copy("copy_45f0c53899bc") + item.status}</span><span className="text-[8px] text-slate-400">{formatResidentDateTime(item.scheduledAt || item.createdAt)}</span></div>
-    <h3 className="mb-1 mt-2 text-[12px] font-bold text-slate-900">{item.title}</h3>
-    <p className="mb-2 text-[8px] text-slate-500">{item.reference} {copy("copy_71e8c6df1273")}{item.area}</p>
-    {imageUrl ? <img src={imageUrl} alt={`Announcement: ${item.title}`} className="my-2 block max-h-56 w-full rounded-lg object-cover" /> : <div className="cepalco-scene" role="img" aria-label={copy("copy_71df1e7e4841")}><span className="scene-cloud" /><span className="scene-pole" /><span className="scene-wire wire-one" /><span className="scene-wire wire-two" /><span className="scene-bucket" /><span className="scene-worker worker-one" /><span className="scene-worker worker-two" /><span className="scene-road" /><span className="scene-caption">{copy("copy_806a713aa5b3")}</span></div>}
+    <div className="cepalco-incident-cover">
+      {imageUrl ? <img src={imageUrl} alt={`Announcement: ${item.title}`} /> : <div className="cepalco-scene" role="img" aria-label={copy("copy_71df1e7e4841")}><span className="scene-cloud" /><span className="scene-pole" /><span className="scene-wire wire-one" /><span className="scene-wire wire-two" /><span className="scene-bucket" /><span className="scene-worker worker-one" /><span className="scene-worker worker-two" /><span className="scene-road" /><span className="scene-caption">{copy("copy_806a713aa5b3")}</span></div>}
+      <div className="cepalco-incident-cover-meta"><span className={`cepalco-status ${statusStyle}`}>{item.publicationStatus === "scheduled" ? "Scheduled" : item.publicationStatus === "failed" ? "Publishing failed" : copy("copy_45f0c53899bc") + item.status}</span><time>{formatResidentDateTime(item.scheduledAt || item.createdAt)}</time></div>
+    </div>
+    <h3>{item.title}</h3>
+    <p className="cepalco-incident-area">{item.reference} {copy("copy_71e8c6df1273")}{item.area}</p>
     <p className="mb-2 mt-2 text-[8px] leading-4 text-slate-600"><strong className="text-teal-800">{copy("copy_3f1e0db044b6")}</strong> {item.details}</p>
     <SocialPostLinks item={item} />
     {!compact && <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-2 text-[8px] text-slate-500"><span>{copy("copy_401411b3e7cd")}</span><span>{copy("copy_2d32246bb801")}</span><div className="flex gap-2"><button onClick={() => setDetailsOpen(!detailsOpen)} className="font-bold text-teal-800">{detailsOpen ? copy("copy_c9722a7a962a") : copy("copy_a6fee21d1c59")}</button>{onStatusUpdate && item.publicationStatus !== "scheduled" && item.publicationStatus !== "failed" && <button onClick={() => onStatusUpdate(item)} className="rounded border border-slate-200 px-2 py-1 font-semibold text-slate-700">{copy("copy_1e6bf669df09")}</button>}</div></div>}
@@ -1384,14 +1407,15 @@ function CepalcoIncidentCard({ item, compact = false, onStatusUpdate }: { item: 
   </article>;
 }
 
-function CepalcoDisruptions({ items, onPublish, onStatusUpdate }: { items: Advisory[]; onPublish: () => void; onStatusUpdate: (item: Advisory) => void }) {
+function CepalcoDisruptions({ items, onStatusUpdate, token }: { items: Advisory[]; onStatusUpdate: (item: Advisory) => void; token: string | null }) {
   const [query, setQuery] = useState("");
   const incidentStatuses = requiredSetting(settingsFor("cepalco").filters?.incidentStatuses, "cepalco.filters.incidentStatuses");
   const [statusFilter, setStatusFilter] = useState(incidentStatuses[0]);
   const filtered = items.filter(item => `${item.title} ${item.area} ${item.reference} ${item.details}`.toLowerCase().includes(query.toLowerCase()) && (statusFilter === "All" || item.status === statusFilter));
-  return <section className="cepalco-page-stack">
-    <div className="cepalco-toolbar"><label className="cepalco-search"><Icon name="search" className="h-4 w-4" /><input value={query} onChange={event => setQuery(event.target.value)} placeholder={copy("copy_7145ac5f783f")} /></label><select value={statusFilter} onChange={event => setStatusFilter(event.target.value)} aria-label={copy("copy_d96d73ecc01f")}><option>{copy("copy_a52ace420f21")}</option><option>{copy("copy_1dc83f605edf")}</option><option>{copy("copy_f9bdb11906ee")}</option><option>{copy("copy_8f62edb51e5f")}</option><option>{copy("copy_5be3c2c8354e")}</option></select><button className="cepalco-primary" onClick={onPublish}><Icon name="plus" className="h-4 w-4" />{copy("copy_3e2f45d85a26")}</button></div>
-    <div className="space-y-3">{filtered.map(item => <CepalcoIncidentCard key={item.id} item={item} onStatusUpdate={onStatusUpdate} />)}{!filtered.length && <Empty message={copy("copy_e5e64ce05143")} />}</div>
+  return <section className="cepalco-page-stack admin-page-stack">
+    <div className="cepalco-toolbar"><label className="cepalco-search"><Icon name="search" className="h-4 w-4" /><span className="sr-only">Search power advisories</span><input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder={copy("copy_7145ac5f783f")} /></label><select value={statusFilter} onChange={event => setStatusFilter(event.target.value)} aria-label={copy("copy_d96d73ecc01f")}>{incidentStatuses.map(status => <option key={status}>{status}</option>)}</select></div>
+    <div className="cepalco-incident-grid">{filtered.map(item => <CepalcoIncidentCard key={item.id} item={item} onStatusUpdate={onStatusUpdate} />)}{!filtered.length && <Empty message={copy("copy_e5e64ce05143")} />}</div>
+    <ActivityLog portal="cepalco" token={token} />
   </section>;
 }
 
@@ -1465,15 +1489,15 @@ function GenericAnnouncementComposer({
     </section>
     <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-5">
       <h3 className="m-0 text-sm font-bold text-slate-900">Announcement channels</h3>
-      <p className="m-0 text-xs text-slate-500">Select one or more channels. Social accounts and Gmail must be configured by an administrator.</p>
+      <p className="m-0 text-xs text-slate-500">Facebook and Gmail are included with every announcement. Other channels are optional.</p>
       <div className="grid gap-2 sm:grid-cols-2">
         {([
-          ["facebook", "Facebook", "Post to the utility Facebook page."],
+          ["facebook", "Facebook", "Post every announcement to the utility Facebook page."],
           ["instagram", "Instagram", "Publish an image and caption to Instagram."],
-          ["gmail", "Gmail", "Email residents who opted in to immediate advisory alerts."],
+          ["gmail", "Gmail", "Email every registered resident with the announcement image."],
           ["sms", "SMS (simulated)", "Add a simulated alert to opted-in residents' inboxes; no text message is sent."],
         ] as const).map(([value, title, description]) => <label key={value} className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-3 text-xs">
-          <input type="checkbox" name="channels" value={value} className="mt-0.5 accent-[var(--brand)]" />
+          <input type="checkbox" name="channels" value={value} checked={isRequiredAnnouncementChannel(value)} disabled={isRequiredAnnouncementChannel(value)} className="mt-0.5 accent-[var(--brand)]" />
           <span><strong className="block text-slate-800">{title}</strong><small className="mt-1 block text-slate-500">{description}</small></span>
         </label>)}
       </div>
@@ -1507,9 +1531,9 @@ function CepalcoPublishForm({ busy, token, onCancel, onSubmit }: { busy: boolean
   const priorities = requiredSetting(settingsFor("cepalco").priorities, "cepalco.priorities");
   const [category, setCategory] = useState(() => readPortalDraftValue("cepalco", "category") || categories[0]?.value || "");
   const [selectedLocation, setSelectedLocation] = useState<CivicAlertMapLocation | null>(null);
-  const [channels, setChannels] = useState(() => {
+  const [channels, setChannels] = useState<string[]>(() => {
     const draft = readPortalDraftChannels("cepalco");
-    return draft.length > 0 ? draft : ["sms", "gmail"];
+    return draft.length > 0 ? draft : [...DEFAULT_ANNOUNCEMENT_CHANNELS];
   });
   const [schedule, setSchedule] = useState(() => readPortalDraftValue("cepalco", "schedule") === "true");
   const [draftSaved, setDraftSaved] = useState(false);
@@ -1531,6 +1555,7 @@ function CepalcoPublishForm({ busy, token, onCancel, onSubmit }: { busy: boolean
     setDraftSaved(true);
   }
   function toggleChannel(channel: string) {
+    if (isRequiredAnnouncementChannel(channel)) return;
     setChannels(current => current.includes(channel)
       ? current.filter(value => value !== channel)
       : [...current, channel]);
@@ -1544,50 +1569,50 @@ function CepalcoPublishForm({ busy, token, onCancel, onSubmit }: { busy: boolean
         <p>Write a clear service update, choose who receives it, then publish or schedule it.</p>
         <div className="cepalco-category-grid">{categories.map(({ value, description, icon }) => <button key={value} type="button" aria-pressed={category === value} onClick={() => { setCategory(value); setDraftSaved(false); }} className={`cepalco-category ${category === value ? "selected" : ""}`}><span>{icon}</span><strong>{value}</strong><small>{description}</small></button>)}</div>
         <input type="hidden" name="category" value={category} />
-        <label className="cepalco-field">Priority / severity<select name="priority" defaultValue={readPortalDraftValue("cepalco", "priority") || "High"} onChange={() => setDraftSaved(false)}>{priorities.map(priority => <option key={priority}>{priority}</option>)}</select></label>
+        <label className="cepalco-field"><span>Priority / severity</span><select name="priority" defaultValue={readPortalDraftValue("cepalco", "priority") || "High"} onChange={() => setDraftSaved(false)}>{priorities.map(priority => <option key={priority}>{priority}</option>)}</select></label>
       </section>
       <section className="cepalco-form-card">
         <h2>Headline and affected service area</h2>
         <p>Identify the issue and the neighborhoods or zones that may be affected.</p>
-        <label className="cepalco-field">Advisory headline<input name="title" required maxLength={160} defaultValue={readPortalDraftValue("cepalco", "title")} placeholder="Summarize the service update" onChange={() => setDraftSaved(false)} /></label>
-        <label className="cepalco-field">Affected zone or district<input name="area" required maxLength={160} defaultValue={readPortalDraftValue("cepalco", "area")} placeholder="District, barangay, or service area" onChange={() => setDraftSaved(false)} /></label>
+        <label className="cepalco-field"><span>Advisory headline</span><input name="title" required maxLength={160} defaultValue={readPortalDraftValue("cepalco", "title")} placeholder="Summarize the service update" onChange={() => setDraftSaved(false)} /></label>
+        <label className="cepalco-field"><span>Affected barangay and purok</span><input name="area" list="cepalco-pilot-barangays" required maxLength={160} defaultValue={readPortalDraftValue("cepalco", "area")} placeholder="Carmen, Nazareth, or Balulang; add Purok if needed" onChange={() => setDraftSaved(false)} /><datalist id="cepalco-pilot-barangays">{["Carmen", "Nazareth", "Balulang"].map(name => <option key={name} value={name} />)}</datalist><small>Target one pilot barangay per advisory. Add a purok, such as “Carmen, Purok 4,” to narrow matching.</small></label>
       </section>
       <section className="cepalco-form-card">
         <h2>Service window</h2>
         <p>Add the expected start and restoration time when known.</p>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="cepalco-field">Advisory start<input name="serviceStartsAt" type="datetime-local" defaultValue={readPortalDraftValue("cepalco", "serviceStartsAt")} onChange={() => setDraftSaved(false)} /></label>
-          <label className="cepalco-field">Estimated restoration<input name="estimatedRestorationAt" type="datetime-local" defaultValue={readPortalDraftValue("cepalco", "estimatedRestorationAt")} onChange={() => setDraftSaved(false)} /></label>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="cepalco-field"><span>Advisory start</span><input name="serviceStartsAt" type="datetime-local" defaultValue={readPortalDraftValue("cepalco", "serviceStartsAt")} onChange={() => setDraftSaved(false)} /></label>
+          <label className="cepalco-field"><span>Estimated restoration</span><input name="estimatedRestorationAt" type="datetime-local" defaultValue={readPortalDraftValue("cepalco", "estimatedRestorationAt")} onChange={() => setDraftSaved(false)} /></label>
         </div>
       </section>
       <section className="cepalco-form-card">
-        <div className="flex items-start justify-between gap-2"><div><h2>Public notice and safety guidance</h2><p>Describe the impact and any steps residents should take.</p></div><small>{detailsLength} / 1800</small></div>
-        <label className="cepalco-field">Advisory details<textarea name="details" required rows={6} maxLength={1800} defaultValue={readPortalDraftValue("cepalco", "details")} placeholder="Explain what happened, who is affected, and any safety guidance." onChange={event => { setDetailsLength(event.target.value.length); setDraftSaved(false); }} /></label>
+        <div className="mb-2 flex items-center justify-between gap-2"><div><h2>Public notice and safety guidance</h2><p className="mb-0">Describe the impact and any steps residents should take.</p></div><small className="text-xs font-semibold text-slate-500">{detailsLength} / 1800</small></div>
+        <label className="cepalco-field"><span>Advisory details</span><textarea name="details" required rows={6} maxLength={1800} defaultValue={readPortalDraftValue("cepalco", "details")} placeholder="Explain what happened, who is affected, and any safety guidance." onChange={event => { setDetailsLength(event.target.value.length); setDraftSaved(false); }} /></label>
       </section>
       <section className="cepalco-form-card">
         <h2>Affected location</h2>
         <p>Optionally add a point on the map for residents to locate the advisory.</p>
         <input type="hidden" name="latitude" value={selectedLocation?.latitude ?? ""} />
         <input type="hidden" name="longitude" value={selectedLocation?.longitude ?? ""} />
-        <GoogleMap mode="picker" height={230} label="Select affected service location" onLocationSelected={setSelectedLocation} />
-        <p className="mb-0 mt-2 text-xs text-slate-600">{selectedLocation ? `Selected point: ${selectedLocation.latitude.toFixed(5)}, ${selectedLocation.longitude.toFixed(5)}` : "No map point selected. The advisory can still be published without one."}</p>
+        <GoogleMap mode="picker" height={250} label="Select affected service location" onLocationSelected={setSelectedLocation} />
+        <p className="mb-0 mt-2 text-xs font-medium text-slate-600">{selectedLocation ? `Selected point: ${selectedLocation.latitude.toFixed(5)}, ${selectedLocation.longitude.toFixed(5)}` : "No map point selected. The advisory can still be published without one."}</p>
       </section>
       <section className="cepalco-form-card">
-        <h2>Notice image (optional)</h2>
-        <p>Add a photo to the advisory. Instagram publishing needs an image.</p>
-        <label className="cepalco-field">Image file<input type="file" name="announcementImage" accept="image/jpeg,image/png,image/webp" onChange={event => { const file = event.target.files?.[0]; setImagePreview(file ? URL.createObjectURL(file) : null); setDraftSaved(false); }} /><small>JPEG, PNG, or WebP, up to 15 MB. Oversized images are optimized to fit the publishing limit.</small></label>
+        <h2>Notice image</h2>
+        <p>Add an image to include it with selected Facebook, Instagram, and Gmail delivery. Instagram always requires an image.</p>
+        <label className="cepalco-field"><span>Image file</span><input type="file" name="announcementImage" accept="image/jpeg,image/png,image/webp" onChange={event => { const file = event.target.files?.[0]; setImagePreview(file ? URL.createObjectURL(file) : null); setDraftSaved(false); }} /><small>JPEG, PNG, or WebP, up to 15 MB. Automatically converted and optimized for Instagram.</small></label>
         {imagePreview && <img src={imagePreview} alt="Selected advisory image preview" className="cepalco-announcement-preview" />}
       </section>
       <section className="cepalco-form-card">
         <h2>Distribution channels</h2>
-        <p>Select one or more channels. External accounts must be configured on the CEPALCO API.</p>
+        <p>Facebook and Gmail are included with every announcement. Other channels are optional.</p>
         {([
-          ["gmail", "Gmail", "Email residents who opted in to immediate advisory email."],
-          ["facebook", "Facebook", "Post the update to the connected CEPALCO page."],
+          ["gmail", "Gmail", "Email every registered resident with the announcement image."],
+          ["facebook", "Facebook", "Post every announcement to the connected CEPALCO page."],
           ["instagram", "Instagram", "Publish an image and caption to the connected account."],
           ["sms", "Resident inbox alert", "Create simulated inbox alerts; no text messages are sent."],
         ] as const).map(([value, title, description]) => <label className="cepalco-channel" key={value}>
-          <input type="checkbox" name="channels" value={value} checked={channels.includes(value)} onChange={() => toggleChannel(value)} />
+          <input type="checkbox" name="channels" value={value} checked={isRequiredAnnouncementChannel(value) || channels.includes(value)} disabled={isRequiredAnnouncementChannel(value)} onChange={() => toggleChannel(value)} />
           <span><strong>{title}</strong><small>{description}</small></span>
         </label>)}
         <SocialConnectionStatus portal="cepalco" token={token} />
@@ -1625,11 +1650,11 @@ function CepalcoMiniMap() {
 }
 
 function CepalcoRestorationMap({ advisories }: { advisories: Advisory[] }) {
-  const active = advisories.filter(item => item.status !== "Resolved");
+  const active = advisories.filter(item => !["Resolved", "Cancelled"].includes(item.status));
   const settings = settingsFor("cepalco");
   const metrics = requiredSetting(settings.mapMetrics, "cepalco.mapMetrics");
   const minimumFieldCrews = Number(requiredSetting(settings.dashboard?.minimumFieldCrews, "cepalco.dashboard.minimumFieldCrews"));
-  return <div className="cepalco-page-stack">
+  return <div className="cepalco-page-stack admin-page-stack">
     <section className="cepalco-map-metrics grid grid-cols-2 gap-2 xl:grid-cols-4">{metrics.map(metric => <MapMetric key={metric.key} label={metric.label} value={metric.key === "activeOutage" ? String(active.length) : metric.key === "crewsInField" ? String(Math.max(active.length, minimumFieldCrews)) : metric.value || ""} detail={metric.key === "activeOutage" ? active[0]?.area || metric.detail : metric.detail} icon={metric.icon} />)}</section>
     <article className="cepalco-form-card"><div className="mb-3 flex items-center justify-between"><div><h2>{copy("copy_10811357280f")}</h2><p>{copy("copy_447c01316fb5")}</p></div><span className="cepalco-pill good">{copy("copy_b373fc245b9f")}</span></div><CepalcoLargeMap advisories={active} /><div className="mt-3 flex flex-wrap gap-4 text-[9px] text-slate-600"><span>{copy("copy_bbf0b0b5e5df")}</span><span className="text-amber-700">{copy("copy_8ee132327af2")}</span><span className="text-teal-800">{copy("copy_f30c5b09f4f0")}</span></div></article>
     <section><div className="mb-2 flex items-center justify-between"><div><h2 className="m-0 text-sm font-bold text-slate-900">{copy("copy_bdbeadd93387")}</h2><p className="mb-0 mt-1 text-[9px] text-slate-500">{copy("copy_bee37faf7a58")}</p></div></div><div className="space-y-2">{active.slice(0, 3).map(item => <CepalcoIncidentCard key={item.id} item={item} compact />)}{!active.length && <Empty message={copy("copy_375022a22378")} />}</div></section>
@@ -1645,7 +1670,7 @@ function MapMetric({ label, value, detail, icon }: { label: string; value: strin
   return <article className="cepalco-map-metric"><span className="cepalco-metric-icon"><Icon name={icon} className="h-4 w-4" /></span><small>{label}</small><strong>{value}</strong><span>{detail}</span></article>;
 }
 
-function CepalcoSchedule({ workOrders, onCreate, onPublish }: { workOrders: WorkOrder[]; onCreate: () => void; onPublish: () => void }) {
+function CepalcoSchedule({ workOrders, onCreate }: { workOrders: WorkOrder[]; onCreate: () => void }) {
   const [query, setQuery] = useState("");
   const workStatusFilters = requiredSetting(settingsFor("cepalco").filters?.workStatuses, "cepalco.filters.workStatuses");
   const scheduleMetrics = requiredSetting(settingsFor("cepalco").scheduleMetrics, "cepalco.scheduleMetrics");
@@ -1656,16 +1681,16 @@ function CepalcoSchedule({ workOrders, onCreate, onPublish }: { workOrders: Work
     <div className="space-y-3">
       <section className="cepalco-schedule-banner"><div className="flex flex-wrap items-start justify-between gap-3"><div><span className="cepalco-kicker">{copy("copy_51317d45483f")}</span><h2>{copy("copy_c57ce600b1f3")}</h2><p>{copy("copy_1c84971559bc")}</p></div><div className="flex gap-2"><button aria-pressed={!calendarMode} onClick={() => setCalendarMode(false)} className={`cepalco-secondary ${!calendarMode ? "selected" : ""}`}>{copy("copy_5d8c3e1b635e")}</button><button aria-pressed={calendarMode} onClick={() => setCalendarMode(true)} className={`cepalco-secondary ${calendarMode ? "selected" : ""}`}>{copy("copy_d5d0a30b517e")}</button><button onClick={onCreate} className="cepalco-primary"><Icon name="plus" className="h-4 w-4" />{copy("copy_7edcd3387306")}</button></div></div></section>
       <section className="grid grid-cols-2 gap-2 xl:grid-cols-4">{scheduleMetrics.map(metric => <MapMetric key={metric.key} label={metric.label} value={metric.key === "scheduledThisWeek" ? `${workOrders.length} ${metric.value}` : metric.value} detail={metric.key === "scheduledThisWeek" ? `${workOrders.length} ${metric.detail}` : metric.detail} icon={metric.icon} />)}</section>
-      <section className="cepalco-schedule-tools"><label className="cepalco-search"><Icon name="search" className="h-4 w-4" /><input value={query} onChange={event => setQuery(event.target.value)} placeholder={copy("copy_91467d8b4efb")} /></label><div className="flex flex-wrap gap-1.5">{workStatusFilters.map(value => <button key={value} onClick={() => setFilter(value)} className={`cepalco-chip ${filter === value ? "active" : ""}`}>{value}</button>)}</div></section>
-      {calendarMode ? <CepalcoWeekCalendar workOrders={filtered} /> : <div className="space-y-2">{filtered.map(item => <CepalcoWorkOrderCard key={item.id} item={item} onPublish={onPublish} />)}{!filtered.length && <Empty message={copy("copy_ce2e86d4a3a6")} />}</div>}
+      <section className="cepalco-schedule-tools"><label className="cepalco-search"><Icon name="search" className="h-4 w-4" /><span className="sr-only">Search scheduled work</span><input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder={copy("copy_91467d8b4efb")} /></label><div className="flex flex-wrap gap-1.5">{workStatusFilters.map(value => <button type="button" key={value} aria-pressed={filter === value} onClick={() => setFilter(value)} className={`cepalco-chip ${filter === value ? "active" : ""}`}>{value}</button>)}</div></section>
+      {calendarMode ? <CepalcoWeekCalendar workOrders={filtered} /> : <div className="space-y-2">{filtered.map(item => <CepalcoWorkOrderCard key={item.id} item={item} />)}{!filtered.length && <Empty message={copy("copy_ce2e86d4a3a6")} />}</div>}
     </div>
     <aside className="space-y-3"><article className="cepalco-form-card"><h2>{copy("copy_70558b6c66f3")}</h2><p>{copy("copy_de0ab18c81de")}</p>{workOrders.slice(0, 4).map(item => <div key={item.id} className="cepalco-timeline-item"><span className="timeline-date">{new Date(item.startsAt).toLocaleDateString("en-PH", { day: "2-digit" })}</span><span><strong>{item.title}</strong><small>{item.area}</small></span><b>{copy("copy_d1a1b98335bb")}</b></div>)}</article><article className="cepalco-form-card"><h2>{copy("copy_64aaec8194af")}</h2><p>{copy("copy_42bc456a30be")}</p><button onClick={onCreate} className="cepalco-secondary w-full">{copy("copy_1232396a55b8")}</button></article><article className="cepalco-form-card"><h2>{copy("copy_9332dd54b569")}</h2><CepalcoMiniMap /></article></aside>
   </div>;
 }
 
-function CepalcoWorkOrderCard({ item, onPublish }: { item: WorkOrder; onPublish: () => void }) {
+function CepalcoWorkOrderCard({ item }: { item: WorkOrder }) {
   const [showPacket, setShowPacket] = useState(false);
-  return <article className="cepalco-work-card"><div className="flex flex-wrap items-start justify-between gap-2"><span className="cepalco-status resolved">{item.reference} {copy("copy_6e01f78b9eb4")}{item.status}</span><span className="text-[8px] text-slate-400">{copy("copy_da49d5d4750d")}</span></div><h3>{item.title}</h3><p>{item.area}</p><div className="grid gap-2 sm:grid-cols-3"><ScheduleDetail label={copy("copy_049c17e187d2")} value={`${formatResidentDateTime(item.startsAt)} — ${formatResidentDateTime(item.endsAt)}`} /><ScheduleDetail label={copy("copy_0969fb5e5928")} value={copy("copy_1c4753b85d42")} /><ScheduleDetail label={copy("copy_a702947cfde1")} value={copy("copy_50c03d261320")} /></div><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => setShowPacket(!showPacket)} className="cepalco-secondary">{showPacket ? copy("copy_95275efd310a") : copy("copy_d88a112e8b2e")}</button><button onClick={onPublish} className="cepalco-secondary">{copy("copy_116ec6366ec1")}</button></div>{showPacket && <div className="cepalco-work-packet"><strong>{copy("copy_2b46b261ae81")}{item.reference}</strong><span>{item.title} {copy("copy_6e01f78b9eb4")}{item.area}</span><span>{formatResidentDateTime(item.startsAt)} {copy("copy_cfcd41ea5383")}{formatResidentDateTime(item.endsAt)}</span><span>{copy("copy_4889951f6134")}{item.status}</span></div>}</article>;
+  return <article className="cepalco-work-card"><div className="flex flex-wrap items-start justify-between gap-2"><span className="cepalco-status resolved">{item.reference} {copy("copy_6e01f78b9eb4")}{item.status}</span><span className="text-[8px] text-slate-400">{copy("copy_da49d5d4750d")}</span></div><h3>{item.title}</h3><p>{item.area}</p><div className="grid gap-2 sm:grid-cols-3"><ScheduleDetail label={copy("copy_049c17e187d2")} value={`${formatResidentDateTime(item.startsAt)} — ${formatResidentDateTime(item.endsAt)}`} /><ScheduleDetail label={copy("copy_0969fb5e5928")} value={copy("copy_1c4753b85d42")} /><ScheduleDetail label={copy("copy_a702947cfde1")} value={copy("copy_50c03d261320")} /></div><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => setShowPacket(!showPacket)} className="cepalco-secondary">{showPacket ? copy("copy_95275efd310a") : copy("copy_d88a112e8b2e")}</button></div>{showPacket && <div className="cepalco-work-packet"><strong>{copy("copy_2b46b261ae81")}{item.reference}</strong><span>{item.title} {copy("copy_6e01f78b9eb4")}{item.area}</span><span>{formatResidentDateTime(item.startsAt)} {copy("copy_cfcd41ea5383")}{formatResidentDateTime(item.endsAt)}</span><span>{copy("copy_4889951f6134")}{item.status}</span></div>}</article>;
 }
 
 function CepalcoWeekCalendar({ workOrders }: { workOrders: WorkOrder[] }) {
@@ -1685,7 +1710,7 @@ function ScheduleDetail({ label, value }: { label: string; value: string }) {
 }
 
 function ResidentOverview({ actor, advisories, onNavigate }: { actor: Actor; advisories: Advisory[]; onNavigate: (page: string) => void }) {
-  const activeCount = advisories.filter(item => item.status !== "Resolved").length;
+  const activeCount = advisories.filter(item => !["Resolved", "Cancelled"].includes(item.status)).length;
   const dashboard = requiredSetting(settingsFor("resident").dashboard, "resident.dashboard");
   const metrics = requiredSetting(settingsFor("resident").metrics, "resident.metrics").map(metric => ({
     ...metric,
@@ -1695,24 +1720,24 @@ function ResidentOverview({ actor, advisories, onNavigate }: { actor: Actor; adv
         ? String(requiredSetting(dashboard.connectedServices, "resident.dashboard.connectedServices"))
         : metric.value,
   }));
-  return <div className="resident-workspace space-y-4">
-    <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-      {metrics.map(metric => <article key={metric.key} className="resident-metric-card rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><div className="flex items-start justify-between"><span className="grid h-9 w-9 place-items-center rounded-lg bg-[var(--brand-soft)] text-[var(--brand)]"><Icon name={metric.icon} /></span>{metric.badge && (metric.key !== "activeAdvisories" || activeCount > 0) && <span className={`rounded-full border px-2 py-1 text-[8px] font-semibold ${metric.key === "activeAdvisories" ? "border-rose-200 bg-rose-50 font-bold text-rose-700" : metric.key === "updateFrequency" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 text-slate-500"}`}>{metric.badge}</span>}</div><strong className="mt-3 block text-2xl font-extrabold tracking-tight text-slate-900">{metric.value}</strong><span className="mt-1 block text-[10px] text-slate-500">{metric.label}</span></article>)}
+  return <div className="resident-workspace space-y-6">
+    <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      {metrics.map(metric => <article key={metric.key} className="resident-metric-card rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-start justify-between"><span className="grid h-10 w-10 place-items-center rounded-xl bg-[var(--brand-soft)] text-[var(--brand)]"><Icon name={metric.icon} /></span>{metric.badge && (metric.key !== "activeAdvisories" || activeCount > 0) && <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${metric.key === "activeAdvisories" ? "border-rose-200 bg-rose-50 font-bold text-rose-700" : metric.key === "updateFrequency" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 text-slate-500"}`}>{metric.badge}</span>}</div><strong className="mt-4 block text-3xl font-extrabold tracking-tight text-slate-900">{metric.value}</strong><span className="mt-1 block text-xs font-medium text-slate-500">{metric.label}</span></article>)}
     </section>
-    <section className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_290px]">
-      <article className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
-        <div className="mb-4 flex items-center justify-between gap-3"><div><h2 className="m-0 text-sm font-bold text-slate-900">{copy("copy_90815a5d5f32")}</h2><p className="mb-0 mt-1 text-[9px] text-slate-500">{copy("copy_e71ce3f31ff3")}</p></div><button onClick={() => onNavigate("advisories")} className="text-[9px] font-bold text-[var(--brand)]">{copy("copy_63dff5d5a6f2")}</button></div>
-        <div className="space-y-3">{advisories.slice(0, 3).map(item => <ResidentAdvisoryCard key={item.id} item={item} compact />)}{advisories.length === 0 && <Empty message={copy("copy_a97e0906b67f")} />}</div>
+    <section className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
+      <article className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm">
+        <div className="mb-5 flex items-center justify-between gap-3"><div><h2 className="m-0 text-base font-bold text-slate-900">{copy("copy_90815a5d5f32")}</h2><p className="mb-0 mt-1 text-xs text-slate-500">{copy("copy_e71ce3f31ff3")}</p></div><button onClick={() => onNavigate("advisories")} className="text-xs font-bold text-[var(--brand)] hover:underline">{copy("copy_63dff5d5a6f2")}</button></div>
+        <div className="space-y-4">{advisories.slice(0, 3).map(item => <ResidentAdvisoryCard key={item.id} item={item} compact />)}{advisories.length === 0 && <Empty message={copy("copy_a97e0906b67f")} />}</div>
       </article>
-      <div className="space-y-4">
-        <article className="rounded-xl border border-slate-200 bg-white p-4"><div className="mb-2 flex items-center justify-between"><h2 className="m-0 text-xs font-bold text-slate-900">{copy("copy_4861614144e2")}</h2><span className="rounded-full bg-emerald-50 px-2 py-1 text-[8px] font-bold text-emerald-800">{copy("copy_b5917cae2e50")}</span></div><ResidentCommunityMap /><div className="mt-2 flex gap-2 text-[8px] text-slate-500"><span>{copy("copy_a6264e51595e")}</span><span className="text-amber-700">{copy("copy_1625df60e00b")}</span></div><p className="mb-0 mt-2 text-[9px] text-slate-500">{copy("copy_ad386e3eb489")}{actor.barangay || "your registered service area"}{copy("copy_cdb4ee2aea69")}</p></article>
-        <article className="rounded-xl border border-slate-200 bg-white p-4"><h2 className="mb-3 mt-0 text-xs font-bold text-slate-900">{copy("copy_7ad5d50411ba")}</h2><div className="space-y-2.5"><HealthLine icon="pulse" label={copy("copy_43889238bb6e")} value={advisories.some(item => item.utility === "CEPALCO" && item.status !== "Resolved") ? copy("copy_c1dd64b75680") : copy("copy_996bf57d15be")} /><HealthLine icon="drop" label={copy("copy_b978536dddbb")} value={advisories.some(item => item.utility === "Water District" && item.status !== "Resolved") ? copy("copy_c1dd64b75680") : copy("copy_996bf57d15be")} /></div><button onClick={() => onNavigate("services")} className="mt-3 text-[9px] font-bold text-[var(--brand)]">{copy("copy_bcc07a11eab9")}</button></article>
+      <div className="space-y-5">
+        <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="mb-3 flex items-center justify-between"><h2 className="m-0 text-sm font-bold text-slate-900">{copy("copy_4861614144e2")}</h2><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-800">{copy("copy_b5917cae2e50")}</span></div><ResidentCommunityMap /><div className="mt-3 flex gap-2 text-xs text-slate-500"><span>{copy("copy_a6264e51595e")}</span><span className="font-semibold text-amber-700">{copy("copy_1625df60e00b")}</span></div><p className="mb-0 mt-2 text-xs text-slate-500">{copy("copy_ad386e3eb489")}{actor.barangay || "your registered service area"}{copy("copy_cdb4ee2aea69")}</p></article>
+        <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="mb-4 mt-0 text-sm font-bold text-slate-900">{copy("copy_7ad5d50411ba")}</h2><div className="space-y-3"><HealthLine icon="pulse" label={copy("copy_43889238bb6e")} value={advisories.some(item => item.utility === "CEPALCO" && item.status !== "Resolved") ? copy("copy_c1dd64b75680") : copy("copy_996bf57d15be")} /><HealthLine icon="drop" label={copy("copy_b978536dddbb")} value={advisories.some(item => item.utility === "Water District" && item.status !== "Resolved") ? copy("copy_c1dd64b75680") : copy("copy_996bf57d15be")} /></div><button onClick={() => onNavigate("services")} className="mt-4 text-xs font-bold text-[var(--brand)] hover:underline">{copy("copy_bcc07a11eab9")}</button></article>
       </div>
     </section>
   </div>;
 }
 
-function ResidentAdvisories({ items, workOrders }: { items: Advisory[]; workOrders: WorkOrder[] }) {
+function ResidentAdvisories({ items, workOrders, actor }: { items: Advisory[]; workOrders: WorkOrder[]; actor: Actor }) {
   const filterSettings = requiredSetting(settingsFor("resident").filters, "resident.filters");
   const utilityOptions = requiredSetting(filterSettings.utilities, "resident.filters.utilities");
   const statusOptions = requiredSetting(filterSettings.advisoryStatuses, "resident.filters.advisoryStatuses");
@@ -1732,29 +1757,29 @@ function ResidentAdvisories({ items, workOrders }: { items: Advisory[]; workOrde
     const matchesStatus = status === "All" || status === "Scheduled" || status === item.status;
     return matchesQuery && matchesUtility && matchesStatus;
   });
-  const filterClass = "rounded-full border px-3 py-1.5 text-[8px] font-semibold";
-  return <section className="resident-workspace space-y-4">
-    <div className="resident-advisory-tools rounded-xl border border-slate-200 bg-white p-3">
-      <div className="flex flex-wrap items-center gap-2"><label className="flex min-w-[220px] flex-1 items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-slate-400"><Icon name="search" className="h-3.5 w-3.5" /><input value={query} onChange={event => setQuery(event.target.value)} className="w-full border-0 bg-transparent text-[9px] text-slate-800 outline-none" placeholder={copy("copy_41d242d68aa1")} /></label><select aria-label={copy("copy_1a31145d7148")} value={utility} onChange={event => setUtility(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-[9px] text-slate-700">{utilityOptions.map(option => <option key={option}>{option}</option>)}</select><select aria-label={copy("copy_94d5a7703a82")} value={status} onChange={event => setStatus(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-[9px] text-slate-700">{statusOptions.map(option => <option key={option}>{option}</option>)}</select></div>
-      <div className="mt-3 flex flex-wrap items-center gap-1.5"><span className="mr-1 text-[8px] text-slate-500">{copy("copy_e1146f006ab3")}</span>{quickFilters.map(option => <button key={option} onClick={() => utilityOptions.includes(option) ? (setUtility(option), setStatus("All")) : (setStatus(option), setUtility("All"))} className={`${filterClass} ${utility === option || status === option || (option === "All" && utility === "All" && status === "All") ? "border-[#64234f] bg-[#64234f] text-white" : "border-slate-200 bg-white text-slate-600"}`}>{option}</button>)}</div>
+  const filterClass = "rounded-full border px-3.5 py-1.5 text-xs font-semibold transition-colors";
+  return <section className="resident-workspace space-y-5">
+    <div className="resident-advisory-tools rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex flex-wrap items-center gap-3"><label className="flex min-w-[240px] flex-1 items-center gap-2.5 rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-slate-400 focus-within:border-[var(--brand)] focus-within:bg-white"><Icon name="search" className="h-4 w-4" /><input value={query} onChange={event => setQuery(event.target.value)} className="w-full border-0 bg-transparent text-xs text-slate-800 outline-none" placeholder={copy("copy_41d242d68aa1")} /></label><select aria-label={copy("copy_1a31145d7148")} value={utility} onChange={event => setUtility(event.target.value)} className="rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-medium text-slate-700 outline-none focus:border-[var(--brand)]">{utilityOptions.map(option => <option key={option}>{option}</option>)}</select><select aria-label={copy("copy_94d5a7703a82")} value={status} onChange={event => setStatus(event.target.value)} className="rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-medium text-slate-700 outline-none focus:border-[var(--brand)]">{statusOptions.map(option => <option key={option}>{option}</option>)}</select></div>
+      <div className="mt-3.5 flex flex-wrap items-center gap-2"><span className="mr-1 text-xs font-medium text-slate-500">{copy("copy_e1146f006ab3")}</span>{quickFilters.map(option => <button key={option} onClick={() => utilityOptions.includes(option) ? (setUtility(option), setStatus("All")) : (setStatus(option), setUtility("All"))} className={`${filterClass} ${utility === option || status === option || (option === "All" && utility === "All" && status === "All") ? "border-[#64234f] bg-[#64234f] text-white" : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"}`}>{option}</button>)}</div>
     </div>
     {/* ADDED: Residents can see mapped locations for advisories that include coordinates. */}
-    <article className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
-      <h2 className="mb-1 mt-0 text-sm font-bold text-slate-900">Announcement locations</h2>
-      <p className="mb-3 mt-0 text-xs text-slate-500">Select a marker to see its utility, affected area, and status.</p>
+    <article className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm">
+      <h2 className="mb-1 mt-0 text-base font-bold text-slate-900">Announcement locations</h2>
+      <p className="mb-4 mt-0 text-xs text-slate-500">Select a marker to see its utility, affected area, and status.</p>
       <GoogleMap mode="display" announcements={mapAnnouncements(filtered)} height={320} label="Filtered utility announcements" />
     </article>
-    <div className="grid gap-3 xl:grid-cols-2">{filtered.map(item => <ResidentAdvisoryCard key={`advisory-${item.id}`} item={item} />)}{filteredWorkOrders.map(item => <ResidentWorkCard key={`work-${item.id}`} item={item} />)}{filtered.length + filteredWorkOrders.length === 0 && <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-xs text-slate-500">{copy("copy_2559f73c5e19")}</div>}</div>
+    <div className="resident-advisory-grid">{filtered.map(item => <ResidentAdvisoryCard key={`advisory-${item.id}`} item={item} resident={actor} />)}{filteredWorkOrders.map(item => <ResidentWorkCard key={`work-${item.id}`} item={item} />)}{filtered.length + filteredWorkOrders.length === 0 && <div className="col-span-full rounded-2xl border border-slate-200 bg-white p-12 text-center text-sm text-slate-500">{copy("copy_2559f73c5e19")}</div>}</div>
   </section>;
 }
 
 function ResidentWorkCard({ item }: { item: WorkOrder }) {
   const startsAt = formatResidentDateTime(item.startsAt);
   const endsAt = formatResidentDateTime(item.endsAt);
-  return <article className="resident-advisory-card overflow-hidden rounded-lg border border-slate-200 bg-white">
-    <div className="flex items-center justify-between gap-2 px-3 pt-3"><span className="rounded-full bg-violet-50 px-2 py-1 text-[8px] font-bold text-violet-800">{item.status}</span><span className="text-[8px] text-slate-400">{startsAt}</span></div>
-    <div className="px-3 pt-2"><p className="mb-1 text-[8px] font-semibold text-slate-500">{item.utility} {copy("copy_585642cfbba4")}</p><h3 className="m-0 text-xs font-bold leading-5 text-slate-900">{item.title}</h3><p className="mb-2 mt-1 text-[8px] text-slate-500">{item.reference} {copy("copy_6e01f78b9eb4")}{item.area}</p></div>
-    <div className="px-3 pb-3 pt-1"><p className="mb-2 text-[8px] leading-4 text-slate-600">{copy("copy_cbb05f812c4f")}{startsAt} {copy("copy_4b00b1b86bfd")}{endsAt}{copy("copy_cdb4ee2aea69")}</p><div className="border-t border-slate-100 pt-2 text-[8px] font-semibold text-slate-600">{copy("copy_e0f3fde9df0e")}{item.utility}</div></div>
+  return <article className="resident-advisory-card overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm p-4 border-l-4 border-l-violet-500">
+    <div className="flex items-center justify-between gap-2 px-3 pt-2"><span className="rounded-full bg-violet-50 border border-violet-200 px-2.5 py-0.5 text-xs font-bold text-violet-800">{item.status}</span><span className="text-xs font-medium text-slate-400">{startsAt}</span></div>
+    <div className="px-3 pt-2.5"><p className="mb-1 text-xs font-semibold text-slate-500">{item.utility} {copy("copy_585642cfbba4")}</p><h3 className="m-0 text-sm font-bold leading-snug text-slate-900">{item.title}</h3><p className="mb-2 mt-1 text-xs text-slate-500">{item.reference} {copy("copy_6e01f78b9eb4")}{item.area}</p></div>
+    <div className="px-3 pb-3 pt-1"><p className="mb-2 text-xs leading-5 text-slate-600">{copy("copy_cbb05f812c4f")}{startsAt} {copy("copy_4b00b1b86bfd")}{endsAt}{copy("copy_cdb4ee2aea69")}</p><div className="border-t border-slate-100 pt-2 text-xs font-semibold text-slate-600">{copy("copy_e0f3fde9df0e")}{item.utility}</div></div>
   </article>;
 }
 
@@ -1763,28 +1788,41 @@ function formatResidentDateTime(value: string) {
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("en-PH", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
 }
 
-function ResidentAdvisoryCard({ item, compact = false }: { item: Advisory; compact?: boolean }) {
+function ResidentAdvisoryCard({ item, compact = false, resident }: { item: Advisory; compact?: boolean; resident?: Actor }) {
   const water = item.utility === "Water District";
   const imageUrl = announcementImageUrl(item, "resident");
+  const advisoryArea = item.area.toLocaleLowerCase();
+  const residentArea = [resident?.barangay, resident?.district, resident?.address, resident?.city].filter(Boolean).join(" ").toLocaleLowerCase();
+  const barangayMatch = [resident?.barangay].filter((value): value is string => Boolean(value && value.trim().length > 2)).some(value => advisoryArea.includes(value.toLocaleLowerCase()));
+  const purokTargets = advisoryArea.match(/purok\s+[\w-]+/g) ?? [];
+  const areaMatch = barangayMatch && (purokTargets.length === 0 || purokTargets.some(purok => residentArea.includes(purok)));
   const dateLabel = formatResidentDateTime(item.createdAt);
-  const statusTone = item.status === "Resolved" ? "bg-emerald-50 text-emerald-800" : item.status === "Under investigation" ? "bg-amber-50 text-amber-800" : "bg-rose-50 text-rose-800";
-  const statusBorder = item.status === "Resolved" ? "border-l-emerald-500" : item.status === "Under investigation" ? "border-l-amber-500" : "border-l-rose-500";
-  return <article className={`resident-advisory-card overflow-hidden rounded-lg border border-slate-200 bg-white ${compact ? "" : `border-l-2 ${statusBorder} p-3`}`}>
-    <div className="flex items-center justify-between gap-2 px-3 pt-3"><span className={`rounded-full px-2 py-1 text-[8px] font-bold ${statusTone}`}>{item.status}</span><span className="text-[8px] text-slate-400">{dateLabel}</span></div>
-    <div className="px-3 pt-2"><p className="mb-1 text-[8px] font-semibold text-slate-500">{item.utility} {copy("copy_6e01f78b9eb4")}{item.type}</p><h3 className="m-0 text-xs font-bold leading-5 text-slate-900">{item.title}</h3><p className="mb-2 mt-1 text-[8px] text-slate-500">{item.reference} {copy("copy_6e01f78b9eb4")}{item.area}</p></div>
-    {imageUrl ? <img src={imageUrl} alt={`Announcement: ${item.title}`} className="block max-h-56 w-full object-cover" /> : compact && <div className={`resident-advisory-visual ${water ? "water" : "power"} compact`} role="img" aria-label={`${water ? "Water utility" : "Electric utility"} service update illustration`}><span className="visual-sun" /><span className="visual-hill visual-hill-back" /><span className="visual-hill visual-hill-front" /><span className="visual-grid-line" /><span className="visual-scene-label">{water ? copy("copy_004a5691e71d") : copy("copy_e910d7acceb6")}</span></div>}
-    <div className="px-3 pb-3 pt-2"><p className="mb-2 text-[8px] leading-4 text-slate-600">{item.details}</p>{water && (item.serviceStartsAt || item.estimatedRestorationAt) && <p className="mb-2 text-[8px] leading-4 text-slate-600">{item.serviceStartsAt && <>Service begins {formatResidentDateTime(item.serviceStartsAt)}</>}{item.serviceStartsAt && item.estimatedRestorationAt && " · "}{item.estimatedRestorationAt && <>Estimated restoration {formatResidentDateTime(item.estimatedRestorationAt)}</>}</p>}<SocialPostLinks item={item} /><div className="flex items-center justify-between gap-2 border-t border-slate-100 pt-2 text-[8px]"><span className="font-semibold text-slate-600">{copy("copy_e0f3fde9df0e")}{item.utility}</span><span className="font-bold text-[var(--brand)]">{item.status === "Resolved" ? copy("copy_5ec2be90fc02") : item.status === "Crew dispatched" ? "Crew responding" : "Ongoing check"}</span></div></div>
+  const statusTone = item.status === "Resolved" ? "resolved" : item.status === "Cancelled" ? "cancelled" : item.status === "Scheduled" ? "scheduled" : "active";
+  return <article className={`resident-advisory-card ${compact ? "compact" : ""}`}>
+    <div className={`resident-advisory-cover ${water ? "water" : "power"}`}>
+      {imageUrl ? <img src={imageUrl} alt={`Announcement: ${item.title}`} /> : <div className="resident-advisory-visual" role="img" aria-label={`${water ? "Water utility" : "Electric utility"} service update illustration`}><span className="visual-sun" /><span className="visual-hill visual-hill-back" /><span className="visual-hill visual-hill-front" /><span className="visual-grid-line" /><span className="visual-scene-label">{water ? copy("copy_004a5691e71d") : copy("copy_e910d7acceb6")}</span></div>}
+      <div className="resident-advisory-cover-meta"><span className={`resident-advisory-status ${statusTone}`}>{item.status}</span><time>{dateLabel}</time></div>
+    </div>
+    <div className="resident-advisory-body">
+      <p className="resident-advisory-type">{item.utility} {copy("copy_6e01f78b9eb4")}{item.type}</p>
+      <h3>{item.title}</h3>
+      <p className="resident-advisory-location">{item.reference} {copy("copy_6e01f78b9eb4")}{item.area}</p>
+      {resident && <span className={`resident-area-match ${areaMatch ? "matched" : "unmatched"}`}>{areaMatch ? "May affect your registered area" : "Check affected area against your address"}</span>}
+      <p className="resident-advisory-details">{item.details}</p>
+      {water && (item.serviceStartsAt || item.estimatedRestorationAt) && <p className="resident-advisory-details">{item.serviceStartsAt && <>Service begins {formatResidentDateTime(item.serviceStartsAt)}</>}{item.serviceStartsAt && item.estimatedRestorationAt && " · "}{item.estimatedRestorationAt && <>Estimated restoration {formatResidentDateTime(item.estimatedRestorationAt)}</>}</p>}
+      <SocialPostLinks item={item} />
+      <div className="resident-advisory-footer"><span>{copy("copy_e0f3fde9df0e")}{item.utility}</span><strong>{item.status === "Resolved" ? copy("copy_5ec2be90fc02") : item.status === "Crew dispatched" ? "Crew responding" : "Ongoing check"}</strong></div>
+    </div>
   </article>;
 }
-
 function SocialPostLinks({ item }: { item: Advisory }) {
   const links = [
     ["Facebook", item.facebookUrl],
     ["Instagram", item.instagramUrl],
   ].filter((entry): entry is [string, string] => Boolean(entry[1]) && entry[1]!.startsWith("https://"));
   if (!links.length) return null;
-  return <nav aria-label="Social media posts" className="mb-2 flex flex-wrap gap-x-3 gap-y-1 text-[8px] font-semibold">
-    {links.map(([label, url]) => <a key={label} href={url} target="_blank" rel="noreferrer" className="text-[var(--brand)] underline">{`View ${label} post`}</a>)}
+  return <nav aria-label="Social media posts" className="mb-2.5 flex flex-wrap gap-2 text-xs font-semibold">
+    {links.map(([label, url]) => <a key={label} href={url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-slate-700 hover:border-[var(--brand)] hover:bg-[var(--brand-soft)] hover:text-[var(--brand)] transition-colors">{`View ${label} post`}</a>)}
   </nav>;
 }
 
@@ -1827,30 +1865,47 @@ function DataCard({ item, page, compact = false }: { item: Advisory | WorkOrder 
     <div className="flex items-start justify-between gap-2"><span className={`rounded-full px-2 py-1 text-[9px] font-bold ${status === "Resolved" ? "bg-emerald-50 text-emerald-800" : status === "Under investigation" ? "bg-amber-50 text-amber-800" : "bg-[var(--brand-soft)] text-[var(--brand)]"}`}>{isWork ? item.status : (item as Advisory | ServiceReport).status}</span><span className="text-[9px] text-slate-400">{isWork ? item.startsAt : formatResidentDateTime((item as Advisory).scheduledAt || (item as Advisory | ServiceReport).createdAt)}</span></div>
     <h3 className="mb-1 mt-2 text-sm font-bold text-slate-900">{item.title}</h3><p className="mb-2 text-[10px] text-slate-500">{item.reference} {copy("copy_6e01f78b9eb4")}{item.area}</p>
     {!compact && <div className="flex flex-wrap gap-2 text-[9px] text-slate-500"><span>{item.utility}</span>{!isWork && "details" in item && <span>{copy("copy_6e01f78b9eb4")}{item.details}</span>}{isWork && <span>{copy("copy_d33b48f8d23c")}{item.endsAt}</span>}</div>}
-    {page === "residents" && <button className="mt-2 text-[10px] font-bold text-[var(--brand)]">{copy("copy_029ff7cd00e9")}</button>}
   </article>;
 }
 
-function WaterAdvisories({ items, onPublish }: { items: Advisory[]; onPublish: () => void }) {
+function WaterAdvisories({ items, token, onStatusUpdate }: { items: Advisory[]; token: string | null; onStatusUpdate: (item: Advisory) => void }) {
   const [query, setQuery] = useState("");
   const [featuredOpen, setFeaturedOpen] = useState(false);
   const filtered = items.filter(item => `${item.title} ${item.area} ${item.reference} ${item.details}`.toLowerCase().includes(query.toLowerCase()));
-  return <section className="water-page water-advisories">
-    <label className="water-search"><Icon name="search" className="h-4 w-4" /><input value={query} onChange={event => setQuery(event.target.value)} placeholder={copy("copy_7145ac5f783f")} /></label>
+  return <section className="water-page water-advisories admin-page-stack">
+    <label className="water-search"><Icon name="search" className="h-4 w-4" /><span className="sr-only">Search water advisories</span><input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder={copy("copy_7145ac5f783f")} /></label>
     <article className="water-featured">
       <div><span>{copy("copy_827ea98e475e")}</span><p>{copy("copy_39b70c211aad")}</p></div>
       <button type="button" onClick={() => setFeaturedOpen(!featuredOpen)}>{featuredOpen ? copy("copy_e0ea6e4875f8") : copy("copy_774a3a596063")}</button>
       {featuredOpen && <p className="water-featured-details">{copy("copy_917ffee3fc75")}</p>}
     </article>
     <div className="water-advisory-grid">
-      {filtered.map(item => <WaterAdvisoryCard key={item.id} item={item} />)}
+      {filtered.map(item => <WaterAdvisoryCard key={item.id} item={item} onStatusUpdate={onStatusUpdate} />)}
       {filtered.length === 0 && <div className="water-empty">{copy("copy_b371347d3915")}</div>}
     </div>
-    <button className="water-mobile-publish" onClick={onPublish}><Icon name="plus" className="h-4 w-4" /> {copy("copy_dd4c1e0f180b")}</button>
+    <ActivityLog portal="water" token={token} />
   </section>;
 }
 
-function WaterAdvisoryCard({ item }: { item: Advisory }) {
+function ActivityLog({ portal, token }: { portal: "cepalco" | "water"; token: string | null }) {
+  const [entries, setEntries] = useState<Array<{ id: number; action: string; summary: string; createdAt: string }>>([]);
+  const [loadError, setLoadError] = useState("");
+  useEffect(() => {
+    let active = true;
+    if (!token) return;
+    void localAction<Array<{ id: number; action: string; summary: string; createdAt: string }>>(portal, "/activity", token)
+      .then(result => { if (active) { setEntries(result); setLoadError(""); } })
+      .catch(error => { if (active) { setEntries([]); setLoadError(error instanceof Error ? error.message : "Activity history is unavailable."); } });
+    return () => { active = false; };
+  }, [portal, token]);
+  return <section className="mt-5 rounded-xl border border-slate-200 bg-white p-4">
+    <h2 className="m-0 text-sm font-bold text-slate-900">Activity log</h2>
+    <p className="mb-3 mt-1 text-xs text-slate-500">Recent advisory publishing and status changes for this utility.</p>
+    {loadError ? <p role="status" className="mb-0 text-xs text-amber-800">Activity history is unavailable: {loadError}. Apply the activity log database migration to enable it.</p> : entries.length ? <ol className="m-0 space-y-2 p-0">{entries.map(entry => <li key={entry.id} className="list-none border-t border-slate-100 pt-2 text-xs"><div className="flex flex-wrap justify-between gap-2"><strong className="text-slate-800">{entry.action}</strong><time className="text-slate-400">{formatResidentDateTime(entry.createdAt)}</time></div><p className="mb-0 mt-1 text-slate-600">{entry.summary}</p></li>)}</ol> : <p className="mb-0 text-xs text-slate-500">No activity has been recorded yet.</p>}
+  </section>;
+}
+
+function WaterAdvisoryCard({ item, onStatusUpdate }: { item: Advisory; onStatusUpdate: (item: Advisory) => void }) {
   const [expanded, setExpanded] = useState(false);
   const resolved = item.status === "Resolved";
   const imageUrl = announcementImageUrl(item, "water");
@@ -1862,27 +1917,28 @@ function WaterAdvisoryCard({ item }: { item: Advisory }) {
     {(item.serviceStartsAt || item.estimatedRestorationAt) && <p className="water-card-window">{item.serviceStartsAt && <>Service begins {formatResidentDateTime(item.serviceStartsAt)}</>}{item.serviceStartsAt && item.estimatedRestorationAt && " · "}{item.estimatedRestorationAt && <>Estimated restoration {formatResidentDateTime(item.estimatedRestorationAt)}</>}</p>}
     <p className="water-card-copy">{copy("copy_617e0ed75f3b")}{item.details}</p>
     <SocialPostLinks item={item} />
-    <button type="button" onClick={() => setExpanded(!expanded)}>{expanded ? copy("copy_e0ea6e4875f8") : copy("copy_774a3a596063")}</button>
+    <div className="mt-2 flex flex-wrap items-center gap-3"><button type="button" onClick={() => setExpanded(!expanded)}>{expanded ? copy("copy_e0ea6e4875f8") : copy("copy_774a3a596063")}</button>{item.publicationStatus !== "scheduled" && item.publicationStatus !== "failed" && <button type="button" className="font-semibold text-sky-800" onClick={() => onStatusUpdate(item)}>Update status</button>}</div>
     {expanded && <p className="water-card-detail"><strong>{item.type}</strong>{item.priority && <> · {item.priority} priority</>}<br />{item.details}</p>}
   </article>;
 }
 
 function WaterReports({ reports, onStatusUpdate }: { reports: ServiceReport[]; onStatusUpdate: (report: ServiceReport) => void }) {
-  return <section className="water-page water-reports">
-    {reports.map((report, index) => <article className="water-report-card" key={report.id}>
-      <div className="water-report-content">
-        <div className="water-card-meta"><span className={`water-status ${report.status === "Resolved" ? "resolved" : report.status === "Crew dispatched" ? "dispatched" : "received"}`}>{report.status}</span><span className="water-estimate">{copy("copy_28d364006cf4")}</span><time>{formatResidentDateTime(report.createdAt)}</time></div>
-        <h2>{report.title}</h2>
-        <p className="water-card-ref">{report.reference} {copy("copy_6e01f78b9eb4")}{report.area}</p>
-        <p className="water-card-copy">{report.details || (index === 0 ? "Scope: inspection and pressure-zone assessment." : "Water District · Service report submitted by a resident.")}</p>
-        <button type="button" onClick={() => onStatusUpdate(report)}>{report.status === "Resolved" ? copy("copy_3d28239a59cc") : copy("copy_029ff7cd00e9")}</button>
-      </div>
-      {index === 1 && <div className="water-report-photo" role="img" aria-label={copy("copy_73dc08521006")}><span>{copy("copy_0dc01c942b5c")}</span></div>}
-    </article>)}
+  return <section className="water-page water-reports admin-page-stack">
+    <div className="water-report-grid">
+      {reports.map(report => <article className="water-report-card" key={report.id}>
+        <div className="water-report-cover" aria-hidden="true"><span className="water-report-cover-mark"><Icon name="drop" className="h-9 w-9" /></span><span className="water-report-cover-label">Water service report</span></div>
+        <div className="water-report-content">
+          <div className="water-report-card-meta"><span className={`water-status ${report.status === "Resolved" ? "resolved" : report.status === "Crew dispatched" ? "dispatched" : "received"}`}>{report.status}</span><time>{formatResidentDateTime(report.createdAt)}</time></div>
+          <h2>{report.title}</h2>
+          <p className="water-card-ref"><Icon name="map" className="h-4 w-4" />{report.area}<span>{report.reference}</span></p>
+          <p className="water-card-copy">{report.details || "No additional details were provided."}</p>
+          <button type="button" className="water-report-action" onClick={() => onStatusUpdate(report)}>{report.status === "Resolved" ? copy("copy_3d28239a59cc") : copy("copy_029ff7cd00e9")}</button>
+        </div>
+      </article>)}
+    </div>
     {reports.length === 0 && <div className="water-empty">{copy("copy_e082c3906119")}</div>}
   </section>;
 }
-
 function WaterSchedule({ items, onCreate }: { items: WorkOrder[]; onCreate: () => void }) {
   const [calendarView, setCalendarView] = useState(false);
   const waterItems = items.filter(item => item.utility === "Water District");
@@ -1892,8 +1948,8 @@ function WaterSchedule({ items, onCreate }: { items: WorkOrder[]; onCreate: () =
     const key = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
     return { day, key, items: waterItems.filter(item => item.startsAt.slice(0, 10) === key) };
   });
-  return <section className="water-page water-schedule">
-    <div className="water-schedule-toolbar"><div><strong>{copy("copy_c57ce600b1f3")}</strong><p>{copy("copy_e226a658abd5")}</p></div><div><button className={!calendarView ? "selected" : ""} onClick={() => setCalendarView(false)}>{copy("copy_5d8c3e1b635e")}</button><button className={calendarView ? "selected" : ""} onClick={() => setCalendarView(true)}>{copy("copy_d5d0a30b517e")}</button><button className="water-primary" onClick={onCreate}>{copy("copy_3d6077b94385")}</button></div></div>
+  return <section className="water-page water-schedule admin-page-stack">
+    <div className="water-schedule-toolbar"><div><strong>{copy("copy_c57ce600b1f3")}</strong><p>{copy("copy_e226a658abd5")}</p></div><div><button type="button" aria-pressed={!calendarView} className={!calendarView ? "selected" : ""} onClick={() => setCalendarView(false)}>{copy("copy_5d8c3e1b635e")}</button><button type="button" aria-pressed={calendarView} className={calendarView ? "selected" : ""} onClick={() => setCalendarView(true)}>{copy("copy_d5d0a30b517e")}</button><button type="button" className="water-primary" onClick={onCreate}>{copy("copy_3d6077b94385")}</button></div></div>
     {calendarView ? <div className="water-week-grid">{days.map(({ day, items: scheduled }) => <article key={day.toISOString()}><strong>{new Intl.DateTimeFormat("en-PH", { weekday: "short" }).format(day)}</strong><span>{day.getDate()}</span>{scheduled.map(item => <small key={item.id}>{item.title}</small>)}</article>)}</div> :
       <div className="water-work-list">{waterItems.map(item => <article key={item.id}><span className="water-status scheduled">{item.status}</span><h2>{item.title}</h2><p>{item.reference} {copy("copy_6e01f78b9eb4")}{item.area}</p><div><span>{copy("copy_00308aac2f84")}{formatResidentDateTime(item.startsAt)}</span><span>{copy("copy_fb3ce79b4a5e")}{formatResidentDateTime(item.endsAt)}</span></div></article>)}{waterItems.length === 0 && <div className="water-empty">{copy("copy_b30e808b8c38")}</div>}</div>}
   </section>;
@@ -1905,7 +1961,10 @@ function WaterPublishForm({ busy, token, onCancel, onSubmit }: { busy: boolean; 
   const [category, setCategory] = useState(() => readWaterDraftValue("category") || categories[0]?.value || "");
   const [draftSaved, setDraftSaved] = useState(false);
   const [selectedLocation, setSelectedLocation] = useState<CivicAlertMapLocation | null>(null);
-  const [channels, setChannels] = useState<string[]>(readWaterDraftChannels);
+  const [channels, setChannels] = useState<string[]>(() => {
+    const draft = readWaterDraftChannels();
+    return draft.length > 0 ? draft : [...DEFAULT_ANNOUNCEMENT_CHANNELS];
+  });
   const [schedule, setSchedule] = useState(() => readWaterDraftValue("schedule") === "true");
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [detailsLength, setDetailsLength] = useState(() => readWaterDraftValue("details").length);
@@ -1925,6 +1984,7 @@ function WaterPublishForm({ busy, token, onCancel, onSubmit }: { busy: boolean; 
     setDraftSaved(true);
   };
   const toggleChannel = (channel: string) => {
+    if (isRequiredAnnouncementChannel(channel)) return;
     setChannels(current => current.includes(channel)
       ? current.filter(value => value !== channel)
       : [...current, channel]);
@@ -1936,47 +1996,47 @@ function WaterPublishForm({ busy, token, onCancel, onSubmit }: { busy: boolean; 
       <div><h3>Classify the service update</h3><p>Choose the advisory type and response priority for this notice.</p></div>
       <div className="water-category-grid">{categories.map(({ value, description }) => <button type="button" aria-pressed={category === value} className={category === value ? "selected" : ""} key={value} onClick={() => { setCategory(value); setDraftSaved(false); }}><strong>{value}</strong><small>{description}</small></button>)}</div>
       <input type="hidden" name="category" value={category} />
-      <label>Priority<select name="priority" defaultValue={readWaterDraftValue("priority") || "Urgent"} onChange={() => setDraftSaved(false)}>{priorities.map(priority => <option key={priority}>{priority}</option>)}</select></label>
+      <label><span>Priority</span><select name="priority" defaultValue={readWaterDraftValue("priority") || "Urgent"} onChange={() => setDraftSaved(false)}>{priorities.map(priority => <option key={priority}>{priority}</option>)}</select></label>
     </section>
     <section className="water-form-card">
       <div><h3>Advisory headline and affected area</h3><p>Keep the headline brief and identify the impacted district or neighborhood.</p></div>
-      <label>Advisory headline<input name="title" required maxLength={160} defaultValue={readWaterDraftValue("title")} onChange={() => setDraftSaved(false)} placeholder="Summarize the service update" /></label>
-      <label>Affected zone or district<input name="area" required maxLength={160} defaultValue={readWaterDraftValue("area")} onChange={() => setDraftSaved(false)} placeholder="District, barangay, or service area" /></label>
+      <label><span>Advisory headline</span><input name="title" required maxLength={160} defaultValue={readWaterDraftValue("title")} onChange={() => setDraftSaved(false)} placeholder="Summarize the service update" /></label>
+      <label><span>Affected barangay and purok</span><input name="area" list="water-pilot-barangays" required maxLength={160} defaultValue={readWaterDraftValue("area")} onChange={() => setDraftSaved(false)} placeholder="Carmen, Nazareth, or Balulang; add Purok if needed" /><datalist id="water-pilot-barangays">{["Carmen", "Nazareth", "Balulang"].map(name => <option key={name} value={name} />)}</datalist><small>Target one pilot barangay per advisory. Add a purok, such as “Balulang, Purok 2,” to narrow matching.</small></label>
     </section>
     <section className="water-form-card">
       <div><h3>Service window</h3><p>Include the expected work start and estimated restoration time when known.</p></div>
       <div className="water-timeline-grid">
-        <label>Advisory start<input name="serviceStartsAt" type="datetime-local" defaultValue={readWaterDraftValue("serviceStartsAt")} onChange={() => setDraftSaved(false)} /></label>
-        <label>Estimated restoration<input name="estimatedRestorationAt" type="datetime-local" defaultValue={readWaterDraftValue("estimatedRestorationAt")} onChange={() => setDraftSaved(false)} /></label>
+        <label><span>Advisory start</span><input name="serviceStartsAt" type="datetime-local" defaultValue={readWaterDraftValue("serviceStartsAt")} onChange={() => setDraftSaved(false)} /></label>
+        <label><span>Estimated restoration</span><input name="estimatedRestorationAt" type="datetime-local" defaultValue={readWaterDraftValue("estimatedRestorationAt")} onChange={() => setDraftSaved(false)} /></label>
       </div>
     </section>
     <section className="water-form-card">
       <div className="water-section-heading"><div><h3>Public notice and guidance</h3><p>Explain the impact and any practical steps residents should take.</p></div><small>{detailsLength} / 1800</small></div>
-      <label>Public advisory text<textarea name="details" required rows={6} maxLength={1800} defaultValue={readWaterDraftValue("details")} onChange={event => { setDetailsLength(event.target.value.length); setDraftSaved(false); }} placeholder="Describe the service issue, affected customers, expected timing, and any safety guidance." /></label>
+      <label><span>Public advisory text</span><textarea name="details" required rows={6} maxLength={1800} defaultValue={readWaterDraftValue("details")} onChange={event => { setDetailsLength(event.target.value.length); setDraftSaved(false); }} placeholder="Describe the service issue, affected customers, expected timing, and any safety guidance." /></label>
     </section>
     <section className="water-form-card">
       <div><h3>Pin the affected area</h3><p>Optionally mark the service location on the map.</p></div>
       <input type="hidden" name="latitude" value={selectedLocation?.latitude ?? ""} />
       <input type="hidden" name="longitude" value={selectedLocation?.longitude ?? ""} />
-      <GoogleMap mode="picker" height={230} label="Select affected service location" onLocationSelected={setSelectedLocation} />
+      <GoogleMap mode="picker" height={250} label="Select affected service location" onLocationSelected={setSelectedLocation} />
       <p className="water-selection-note">{selectedLocation ? `Selected point: ${selectedLocation.latitude.toFixed(5)}, ${selectedLocation.longitude.toFixed(5)}` : "No map point selected. The advisory can still be published without one."}</p>
     </section>
     <section className="water-form-card">
-      <div><h3>Notice image (optional)</h3><p>Add a photo or visual for the advisory. Instagram publishing requires an image.</p></div>
-      <label>Image file<input type="file" name="announcementImage" accept="image/jpeg,image/png,image/webp" onChange={event => { const file = event.target.files?.[0]; setImagePreview(file ? URL.createObjectURL(file) : null); setDraftSaved(false); }} /><small>JPEG, PNG, or WebP, up to 15 MB. Oversized images are optimized automatically before upload.</small></label>
+      <div><h3>Notice image</h3><p>Add an image to include it with selected Facebook, Instagram, and Gmail delivery. Instagram always requires an image.</p></div>
+      <label><span>Image file</span><input type="file" name="announcementImage" accept="image/jpeg,image/png,image/webp" onChange={event => { const file = event.target.files?.[0]; setImagePreview(file ? URL.createObjectURL(file) : null); setDraftSaved(false); }} /><small>JPEG, PNG, or WebP, up to 15 MB. Oversized images are optimized automatically before upload.</small></label>
       {imagePreview && <img src={imagePreview} alt="Selected advisory image preview" className="water-image-preview" />}
     </section>
     <section className="water-form-card">
-      <div><h3>Choose announcement channels</h3><p>Only selected channels receive this advisory. External accounts must be configured.</p></div>
+      <div><h3>Announcement channels</h3><p>Facebook and Gmail are sent for every announcement. Other channels are optional.</p></div>
       <div className="water-channel-list">
         {([
-          ["gmail", "Email residents", "Send to residents who opted in to immediate advisory email."],
-          ["facebook", "Facebook", "Publish to the connected utility page."],
+          ["gmail", "Email residents", "Email every registered resident with the announcement image."],
+          ["facebook", "Facebook", "Publish every announcement to the connected utility page."],
           ["instagram", "Instagram", "Publish an image and caption to the connected account."],
           ["sms", "Resident inbox alert", "Create simulated inbox alerts; no text messages are sent."],
         ] as const).map(([value, title, description]) => <label className="water-channel-row" key={value}>
           <span><strong>{title}</strong><small>{description}</small></span>
-          <input type="checkbox" name="channels" value={value} checked={channels.includes(value)} onChange={() => toggleChannel(value)} />
+          <input type="checkbox" name="channels" value={value} checked={isRequiredAnnouncementChannel(value) || channels.includes(value)} disabled={isRequiredAnnouncementChannel(value)} onChange={() => toggleChannel(value)} />
         </label>)}
       </div>
       <SocialConnectionStatus portal="water" token={token} />

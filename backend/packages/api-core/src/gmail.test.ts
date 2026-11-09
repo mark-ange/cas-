@@ -7,6 +7,7 @@ import {
   encryptRefreshToken,
   gmailConnectionFailure,
   GMAIL_SEND_SCOPE,
+  parseGmailImageAttachment,
 } from "./gmail.js";
 
 test("Gmail connection errors identify actionable OAuth configuration failures", () => {
@@ -54,4 +55,14 @@ test("Gmail message includes the full subject, notice, and social post links", (
     body,
   );
   assert.throws(() => createRawEmail("bad\r\nBcc: attacker@example.test", "Subject", "Body"), /Recipient email address is invalid/);
+});
+
+test("Gmail advisory messages attach the uploaded announcement image", () => {
+  const attachment = parseGmailImageAttachment("data:image/png;base64,iVBORw0KGgo=");
+  assert.ok(attachment);
+  const raw = createRawEmail("resident@example.test", "Service notice", "Details", attachment);
+  const message = Buffer.from(raw, "base64url").toString("utf8");
+  assert.match(message, /multipart\/mixed/);
+  assert.match(message, /Content-Disposition: attachment; filename="announcement\.png"/);
+  assert.match(message, /iVBORw0KGgo=/);
 });

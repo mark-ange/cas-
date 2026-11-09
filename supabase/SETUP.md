@@ -10,7 +10,9 @@ The portals use Supabase Auth and Supabase tables for sign-in and application re
    - If the initial migration was already applied, run this compatibility migration if you have not already, then continue with the profile policy migration below.
    - Confirm both complete and check **Database → Tables** for the CivicAlert and legacy-import tables.
 4. Run `migrations/20261023001000_profile_self_service.sql` to enable resident profile editing without allowing residents to change their role or utility.
-5. Create each utility administrator through **Authentication → Users**. Do not set `role` or `utility` in user metadata. Assign roles to accounts you control:
+5. Run `migrations/20261109000000_activity_logs.sql` to create the utility-scoped advisory activity log.
+6. Run `migrations/20261109001000_advisory_statuses.sql` to normalize existing notices to Scheduled, Active, Resolved, or Cancelled.
+7. Create each utility administrator through **Authentication → Users**. Do not set `role` or `utility` in user metadata. Assign roles to accounts you control:
 
    ```sql
    update public.profiles

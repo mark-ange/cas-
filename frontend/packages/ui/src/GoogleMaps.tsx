@@ -51,6 +51,7 @@ interface GoogleMapsApi {
 declare global {
   interface Window {
     google?: { maps?: GoogleMapsApi };
+    gm_authFailure?: () => void;
   }
 }
 
@@ -61,9 +62,11 @@ const DEFAULT_CAGAYAN_DE_ORO: CivicAlertMapLocation = {
 };
 
 let mapsScriptPromise: Promise<GoogleMapsApi> | null = null;
+const MAP_AUTH_FAILURE_EVENT = "civicalert-google-maps-auth-failure";
 
 // ADDED: Load the Maps JavaScript API once per page, using each Vite app's local env key.
 function loadGoogleMaps(apiKey: string): Promise<GoogleMapsApi> {
+  window.gm_authFailure = () => window.dispatchEvent(new Event(MAP_AUTH_FAILURE_EVENT));
   if (window.google?.maps) return Promise.resolve(window.google.maps);
   if (mapsScriptPromise) return mapsScriptPromise;
 
@@ -138,11 +141,20 @@ export function GoogleMap({
     const plottedMarkers: MapsMarker[] = [];
     setLoading(true);
     setMapError("");
+    const handleAuthFailure = () => {
+      if (disposed) return;
+      setLoading(false);
+      setMapError("Google Maps rejected this site's URL. Add this exact localhost or production URL to the browser key's website restrictions in Google Cloud.");
+    };
+    window.addEventListener(MAP_AUTH_FAILURE_EVENT, handleAuthFailure);
 
     if (!apiKey?.trim()) {
       setLoading(false);
       setMapError("Google Maps key is missing. Set VITE_GOOGLE_MAPS_API_KEY in this portal's .env.local file and restart Vite.");
-      return () => { disposed = true; };
+      return () => {
+        disposed = true;
+        window.removeEventListener(MAP_AUTH_FAILURE_EVENT, handleAuthFailure);
+      };
     }
 
     void loadGoogleMaps(apiKey.trim()).then(maps => {
@@ -222,6 +234,7 @@ export function GoogleMap({
 
     return () => {
       disposed = true;
+      window.removeEventListener(MAP_AUTH_FAILURE_EVENT, handleAuthFailure);
       clickListener?.remove();
       selectionMarker?.setMap(null);
       for (const marker of plottedMarkers) marker.setMap(null);

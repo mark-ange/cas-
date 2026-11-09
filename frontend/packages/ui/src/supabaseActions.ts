@@ -30,6 +30,32 @@ export async function supabaseAction<T>(
     }
     return profile;
   };
+  const recordActivity = async (action: string, advisoryId: number, summary: string) => {
+    if (!utility) return;
+    try {
+      const actor = await profileForPortal();
+      const { error } = await supabase.from("activity_logs").insert({
+        utility,
+        actor_id: actor.id,
+        advisory_id: advisoryId,
+        action,
+        summary,
+      });
+      if (error) throw new Error(error.message);
+    } catch (error) {
+      // Audit logging is secondary to dispatch. A pending migration must not
+      // leave an advisory saved but prevent its providers from being called.
+      console.error("Could not record advisory activity. Apply the activity_logs migration.", error);
+    }
+  };
+
+  if (path === "/activity" && method === "GET") {
+    await profileForPortal();
+    const { data, error } = await supabase.from("activity_logs").select("id,utility,advisory_id,action,summary,created_at")
+      .eq("utility", utility).order("id", { ascending: false }).limit(40);
+    raiseSupabaseError(error);
+    return (data ?? []).map(row => toCamel(row as Record<string, unknown>)) as T;
+  }
 
   if (path === "/auth/login" && method === "POST") {
     const { data, error } = await supabase.auth.signInWithPassword({
@@ -149,7 +175,7 @@ export async function supabaseAction<T>(
       type: body.type ?? "Service disruption",
       area: body.area,
       details: body.details,
-      status: scheduledAt ? "Scheduled" : "Monitoring",
+      status: scheduledAt ? "Scheduled" : "Active",
       priority: body.priority ?? "Normal",
       service_starts_at: body.serviceStartsAt || null,
       estimated_restoration_at: body.estimatedRestorationAt || null,
@@ -161,8 +187,9 @@ export async function supabaseAction<T>(
       channels: body.channels ?? [],
     }).select("*").single();
     if (error) throw new Error(error.message);
+    await recordActivity(scheduledAt ? "Advisory scheduled" : "Advisory prepared", Number(data.id), `${String(body.title)} — ${String(body.area)}; channels: ${(body.channels as string[] | undefined)?.join(", ") ?? "none"}.`);
     let delivery: Record<string, unknown> | null = null;
-    if (!scheduledAt) {
+    {
       const apiBaseUrl = ({
         resident: import.meta.env.VITE_RESIDENT_API_URL || "http://localhost:4101",
         cepalco: import.meta.env.VITE_CEPALCO_API_URL || "http://localhost:4102",
@@ -182,6 +209,11 @@ export async function supabaseAction<T>(
         throw new Error(`Advisory was saved in Supabase, but provider delivery failed: ${message}`);
       }
       delivery = deliveryResult as Record<string, unknown>;
+      await recordActivity("Notification dispatch results", Number(data.id), JSON.stringify({
+        email: delivery.emailDelivery ?? null,
+        social: delivery.socialDelivery ?? null,
+        simulatedSmsRecords: delivery.smsQueued ?? 0,
+      }));
     }
     return {
       ...toCamel(data),
@@ -200,6 +232,7 @@ export async function supabaseAction<T>(
       .eq("id", Number(advisoryStatus[1])).eq("utility", utility);
     if (error) throw new Error(error.message);
     if (!count) throw new Error("Advisory not found or access denied.");
+    await recordActivity("Advisory status updated", Number(advisoryStatus[1]), `Status changed to ${String(body.status)}.`);
     return { ok: true } as T;
   }
 
@@ -265,6 +298,7 @@ export async function supabaseAction<T>(
   }
 
   if (path === "/inbox" && method === "GET") {
+    if (portal !== "resident") throw new Error("The simulated SMS inbox is available only to residents.");
     const profile = await profileForPortal();
     const { data, error } = await supabase.from("sms_deliveries")
       .select("id,resident_id,read_at,created_at,advisories(reference,title,utility,area)")
@@ -289,6 +323,7 @@ export async function supabaseAction<T>(
 
   const inboxRead = path.match(/^\/inbox\/(\d+)\/read$/);
   if (inboxRead && method === "PATCH") {
+    if (portal !== "resident") throw new Error("The simulated SMS inbox is available only to residents.");
     const profile = await profileForPortal();
     const { error, count } = await supabase.from("sms_deliveries").update({ read_at: new Date().toISOString() }, { count: "exact" })
       .eq("id", Number(inboxRead[1])).eq("resident_id", profile.id);

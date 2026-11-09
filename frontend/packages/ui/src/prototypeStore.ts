@@ -1,7 +1,7 @@
 import { portalSettings } from "./prototypeSettings.js";
 
 export type Portal = "resident" | "cepalco" | "water";
-export type Status = "Operational" | "Monitoring" | "Under investigation" | "Scheduled" | "Resolved" | "Received" | "Crew dispatched";
+export type Status = "Operational" | "Monitoring" | "Under investigation" | "Scheduled" | "Active" | "Resolved" | "Cancelled" | "Received" | "Crew dispatched";
 export type Actor = {
   id: number | string;
   name: string;
@@ -253,7 +253,7 @@ export function createAdvisory(portal: Portal, values: Record<string, FormDataEn
     id, reference, title: String(values.title ?? "").trim(), utility,
     type: String(values.type ?? values.category ?? "Service advisory"),
     area: String(values.area ?? "").trim(),
-    status: "Monitoring",
+    status: "Active",
     details: String(values.details ?? "").trim(),
     createdAt: new Date().toISOString(),
   };
