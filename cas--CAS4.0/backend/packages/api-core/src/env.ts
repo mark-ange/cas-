@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const shellEnvironmentKeys = new Set(Object.keys(process.env));
+
 function loadEnvFile(filePath: string): void {
   if (!existsSync(filePath)) return;
   const content = readFileSync(filePath, "utf8");
@@ -11,7 +13,7 @@ function loadEnvFile(filePath: string): void {
     const separator = line.indexOf("=");
     if (separator === -1) continue;
     const key = line.slice(0, separator).trim();
-    if (!key || process.env[key] !== undefined) continue;
+    if (!key || shellEnvironmentKeys.has(key)) continue;
     let value = line.slice(separator + 1).trim();
     if (
       (value.startsWith('"') && value.endsWith('"')) ||
@@ -25,8 +27,15 @@ function loadEnvFile(filePath: string): void {
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 
-// Workspace settings override shared defaults; shell-provided variables override both.
+// More specific files override shared defaults; shell-provided variables override all files.
+const envFiles = new Set([
+  join(projectRoot, ".env"),
+  join(projectRoot, ".env.local"),
+  join(projectRoot, "backend", ".env"),
+  join(projectRoot, "backend", ".env.local"),
+  join(process.cwd(), ".env"),
+  join(process.cwd(), ".env.local"),
+]);
+for (const filePath of envFiles) loadEnvFile(filePath);
 loadEnvFile(join(process.cwd(), ".env"));
 loadEnvFile(join(process.cwd(), ".env.local"));
-loadEnvFile(join(projectRoot, ".env"));
-loadEnvFile(join(projectRoot, ".env.local"));

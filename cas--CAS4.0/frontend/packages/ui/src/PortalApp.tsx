@@ -1,25 +1,24 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { Component, FormEvent, type ErrorInfo, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { uiCopy } from "./prototypeCopy.js";
-import { portalSettings as localPortalSettings, type PortalSettings } from "./prototypeSettings.js";
 import {
   type Actor,
   type Advisory,
   type NetworkReading,
+  type PortalContent,
   type Portal,
+  type PortalSettings,
   type ServiceReport,
   type SMSRecord,
   type Status,
   type WorkOrder,
-} from "./prototypeStore.js";
+} from "./domainTypes.js";
 import { GoogleMap, type CommunityAlertMapAnnouncement, type CommunityAlertMapLocation } from "./GoogleMaps.js";
 import { getSupabase } from "./supabase.js";
-import { supabaseAction } from "./supabaseActions.js";
+import { loadAdvisoryImages, supabaseAction } from "./supabaseActions.js";
 import "./styles.css";
 
-const portalSettings = localPortalSettings;
-const DEFAULT_ANNOUNCEMENT_CHANNELS = ["facebook", "gmail"];
-const ANNOUNCEMENT_PUROKS = Array.from({ length: 10 }, (_, index) => String(index + 1));
+const DEFAULT_ANNOUNCEMENT_CHANNELS = ["facebook", "instagram", "gmail"];
+let portalContent: PortalContent | null = null;
 
 type EmailDeliverySummary = {
   status: string;
@@ -33,18 +32,46 @@ type SocialDeliverySummary = {
   platforms: Array<{ platform: string; status: string; message?: string; permalinkUrl?: string }>;
 };
 
+type PortalNotification = {
+  message: string;
+  type: "success" | "error";
+  links?: Array<{ label: string; url: string }>;
+  retryInstagramAdvisoryId?: number;
+};
+
+type WorkspaceSection = "advisories" | "work orders" | "resident reports" | "network readings" | "inbox";
+type WorkspaceErrors = Partial<Record<WorkspaceSection, string>>;
+
+function workspaceErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : "The request could not be completed.";
+  if (/statement timeout|canceling statement/i.test(message)) {
+    return "The database query timed out. Retry in a moment; this does not mean your records were deleted.";
+  }
+  if (/failed to fetch|networkerror|err_connection_refused|fetch failed/i.test(message)) {
+    return "We couldn't connect to the service. Check your internet connection and try again. If the problem continues, contact your service office.";
+  }
+  return message;
+}
+
 function copy(key: string): string {
-  const value = (uiCopy as Record<string, string>)[key];
-  if (value === undefined) throw new Error(`Missing frontend copy key: ${key}`);
+  const value = portalContent?.copy[key];
+  if (value === undefined) throw new Error(`Missing backend copy key: ${key}`);
   return value;
 }
 
 function settingsFor(portal: Portal): PortalSettings {
-  return portalSettings[portal];
+  const settings = portalContent?.settings[portal];
+  if (!settings) throw new Error(`Missing backend settings for ${portal}.`);
+  return settings;
+}
+
+function portalPageAvailable(portal: Portal, page: string): boolean {
+  return settingsFor(portal).navigation.some(item => item.key === page)
+    || ((portal === "cepalco" || portal === "water") && page === "publish");
 }
 
 function requiredSetting<T>(value: T | undefined, name: string): T {
-  if (value === undefined) throw new Error(`Missing prototype setting: ${name}.`);
+  if (value === undefined) throw new Error(`Missing application setting: ${name}.`);
   return value;
 }
 
@@ -56,17 +83,18 @@ function apiBaseUrl(portal: Portal): string {
   })[portal].replace(/\/+$/, "");
 }
 
-function announcementImageUrl(item: Advisory, portal: Portal): string | null {
-  if (!item.imageUrl) return null;
-  if (item.imageUrl.startsWith("data:")) return item.imageUrl;
+function announcementImageUrls(item: Advisory, portal: Portal): string[] {
+  const imageUrls = item.imageUrls?.length ? item.imageUrls : item.imageUrl ? [item.imageUrl] : [];
   const imagePortal = portal === "resident"
     ? item.utility === "Water District" ? "water" : "cepalco"
     : portal;
-  return `${apiBaseUrl(imagePortal)}${item.imageUrl}`;
+  return imageUrls.map(imageUrl => imageUrl.startsWith("data:")
+    ? imageUrl
+    : `${apiBaseUrl(imagePortal)}${imageUrl}`);
 }
 
-async function readAnnouncementImage(file: FormDataEntryValue | null): Promise<string | null> {
-  if (!(file instanceof File) || file.size === 0) return null;
+async function readAnnouncementImage(file: FormDataEntryValue): Promise<string> {
+  if (!(file instanceof File) || file.size === 0) throw new Error("Choose a valid announcement image.");
   const allowedTypes = ["image/jpeg", "image/png", "image/webp"];
   if (!allowedTypes.includes(file.type)) throw new Error("Choose a JPEG, PNG, or WebP image.");
   if (file.size > 15_000_000) throw new Error("Choose an image smaller than 15 MB.");
@@ -120,6 +148,83 @@ async function readAnnouncementImage(file: FormDataEntryValue | null): Promise<s
   throw new Error("This image could not be reduced below 1 MB. Choose a smaller or lower-resolution image.");
 }
 
+async function readAnnouncementImages(files: FormDataEntryValue[]): Promise<string[]> {
+  const selectedFiles = files.filter((file): file is File => file instanceof File && file.size > 0);
+  if (selectedFiles.length > 10) throw new Error("Choose no more than 10 announcement images.");
+  return Promise.all(selectedFiles.map(readAnnouncementImage));
+}
+
+function AnnouncementImagePicker({
+  label,
+  helpText,
+  className = "",
+  labelClass = "",
+  inputClass = "",
+  previewClass = "",
+  onSelectionChange,
+}: {
+  label: string;
+  helpText: string;
+  className?: string;
+  labelClass?: string;
+  inputClass?: string;
+  previewClass?: string;
+  onSelectionChange?: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [files, setFiles] = useState<File[]>([]);
+  const [error, setError] = useState("");
+  const previews = useMemo(() => files.map(file => ({ file, url: URL.createObjectURL(file) })), [files]);
+  useEffect(() => () => previews.forEach(preview => URL.revokeObjectURL(preview.url)), [previews]);
+
+  function updateFiles(nextFiles: File[]) {
+    const input = inputRef.current;
+    if (!input) return;
+    const transfer = new DataTransfer();
+    nextFiles.forEach(file => transfer.items.add(file));
+    input.files = transfer.files;
+    setFiles(nextFiles);
+    setError("");
+    onSelectionChange?.();
+  }
+
+  function addFiles(input: HTMLInputElement) {
+    const incoming = Array.from(input.files ?? []);
+    input.value = "";
+    if (files.length + incoming.length > 10) {
+      updateFiles(files);
+      setError("Choose no more than 10 images.");
+      return;
+    }
+    if (incoming.some(file => !["image/jpeg", "image/png", "image/webp"].includes(file.type))) {
+      updateFiles(files);
+      setError("Choose JPEG, PNG, or WebP images only.");
+      return;
+    }
+    if (incoming.some(file => file.size > 15_000_000)) {
+      updateFiles(files);
+      setError("Choose images smaller than 15 MB each.");
+      return;
+    }
+    updateFiles([...files, ...incoming]);
+  }
+
+  return <div className={className}>
+    <label className={labelClass}>
+      <span>{label} (up to 10)</span>
+      <input ref={inputRef} type="file" name="announcementImages" accept="image/jpeg,image/png,image/webp" multiple className={inputClass} onChange={event => addFiles(event.currentTarget)} />
+      <small>{helpText}</small>
+    </label>
+    {error && <p role="alert" className="mt-2 text-xs font-semibold text-red-600">{error}</p>}
+    {previews.length > 0 && <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
+      {previews.map(({ file, url }, index) => <div key={`${file.name}-${file.lastModified}-${index}`} className="relative min-w-0">
+        <img src={url} alt={`Selected advisory image ${index + 1}`} className={previewClass || "h-24 w-full rounded-lg border border-slate-200 object-cover"} />
+        <button type="button" aria-label={`Remove image ${index + 1}`} onClick={() => updateFiles(files.filter((_, fileIndex) => fileIndex !== index))} className="absolute right-1 top-1 rounded-full bg-slate-900/80 px-2 py-1 text-xs font-bold text-white">×</button>
+      </div>)}
+    </div>}
+  </div>;
+}
+
 // ADDED: Convert existing API advisory records into validated map markers.
 function mapAnnouncements(advisories: Advisory[]): CommunityAlertMapAnnouncement[] {
   return advisories.flatMap(item => {
@@ -159,13 +264,73 @@ function Icon({ name, className = "h-5 w-5" }: { name: string; className?: strin
     drop: "M12 3s7 7.1 7 12a7 7 0 1 1-14 0c0-4.9 7-12 7-12Zm-3 13a3 3 0 0 0 3 2",
     close: "m6 6 12 12M18 6 6 18",
     messages: "M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8A8.5 8.5 0 0 1 8.7 3.9a8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5Z",
+    eye: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Zm10 3.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z",
+    eyeOff: "m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.9 5.2A10.7 10.7 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.1 3.8M6.2 6.2C3.5 8.1 2 12 2 12s3.6 7 10 7a10.7 10.7 0 0 0 4.1-.8",
+    sun: "M12 3v2m0 14v2M5.64 5.64l1.42 1.42m9.88 9.88 1.42 1.42M3 12h2m14 0h2M5.64 18.36l1.42-1.42m9.88-9.88 1.42-1.42M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z",
+    moon: "M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z",
   };
   return <svg aria-hidden="true" className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={paths[name] || paths.home} /></svg>;
 }
 
+function CoordinateInputs({
+  value,
+  onChange,
+  className = "",
+}: {
+  value: CommunityAlertMapLocation | null;
+  onChange: (location: CommunityAlertMapLocation | null) => void;
+  className?: string;
+}) {
+  const [latitude, setLatitude] = useState(value ? String(value.latitude) : "");
+  const [longitude, setLongitude] = useState(value ? String(value.longitude) : "");
+
+  useEffect(() => {
+    if (!value) return;
+    setLatitude(String(value.latitude));
+    setLongitude(String(value.longitude));
+  }, [value?.latitude, value?.longitude]);
+
+  function updateCoordinate(nextLatitude: string, nextLongitude: string) {
+    setLatitude(nextLatitude);
+    setLongitude(nextLongitude);
+    if (!nextLatitude || !nextLongitude) {
+      onChange(null);
+      return;
+    }
+    const parsedLatitude = Number(nextLatitude);
+    const parsedLongitude = Number(nextLongitude);
+    if (Number.isFinite(parsedLatitude) && Number.isFinite(parsedLongitude) &&
+        parsedLatitude >= -90 && parsedLatitude <= 90 &&
+        parsedLongitude >= -180 && parsedLongitude <= 180) {
+      onChange({ latitude: parsedLatitude, longitude: parsedLongitude });
+    } else {
+      onChange(null);
+    }
+  }
+
+  return <div className={`mt-3 grid grid-cols-2 gap-3 ${className}`}>
+    <label className="text-xs font-semibold text-slate-700">
+      Latitude
+      <input name="latitude" type="number" step="any" min="-90" max="90" value={latitude}
+        onChange={event => updateCoordinate(event.target.value, longitude)}
+        className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal text-slate-800"
+        placeholder="e.g. 8.4542" />
+    </label>
+    <label className="text-xs font-semibold text-slate-700">
+      Longitude
+      <input name="longitude" type="number" step="any" min="-180" max="180" value={longitude}
+        onChange={event => updateCoordinate(latitude, event.target.value)}
+        className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal text-slate-800"
+        placeholder="e.g. 124.6319" />
+    </label>
+  </div>;
+}
+
 async function localAction<T>(portal: Portal, path: string, _token: string | null, options: RequestInit = {}): Promise<T> {
   const backendAction = path === "/email/gmail/status" || path === "/email/gmail/connect" ||
-    path === "/social/status" || path.startsWith("/advisories/recipient-estimate") || /^\/advisories\/\d+\/email-delivery\/retry$/.test(path);
+    path === "/social/status" || path.startsWith("/advisories/recipient-estimate") ||
+    (portal !== "resident" && (path === "/inbox" || /^\/inbox\/\d+\/read$/.test(path))) ||
+    /^\/advisories\/\d+\/(?:email-delivery\/retry|social-publish)$/.test(path);
   if (backendAction) {
     const headers = new Headers(options.headers);
     if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
@@ -190,6 +355,56 @@ function Brand({ portal }: { portal: Portal }) {
   </a>;
 }
 
+function PasswordInput({ className = "", ...props }: InputHTMLAttributes<HTMLInputElement>) {
+  const [visible, setVisible] = useState(false);
+  return <span className="relative block">
+    <input {...props} type={visible ? "text" : "password"} className={`${className} pr-12`} />
+    <button
+      type="button"
+      aria-label={visible ? "Hide password" : "Show password"}
+      aria-pressed={visible}
+      onClick={() => setVisible(value => !value)}
+      className="absolute inset-y-0 right-1 my-auto grid h-10 w-10 place-items-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+    ><Icon name={visible ? "eyeOff" : "eye"} className="h-5 w-5" /></button>
+  </span>;
+}
+
+function ServiceAreaDropdown({ className = "", ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
+  const areas = settingsFor("resident").barangays ?? [];
+  const selectedArea = typeof props.value === "string"
+    ? props.value
+    : typeof props.defaultValue === "string" ? props.defaultValue : "";
+  return <select {...props} className={className}>
+    <option value="">Select your barangay / service area</option>
+    {selectedArea && !areas.includes(selectedArea) && <option value={selectedArea}>{selectedArea}</option>}
+    {areas.map(area => <option key={area} value={area}>{area}</option>)}
+  </select>;
+}
+
+function DistrictDropdown({ className = "", ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
+  const districts = settingsFor("resident").districts ?? [];
+  const selectedDistrict = typeof props.value === "string"
+    ? props.value
+    : typeof props.defaultValue === "string" ? props.defaultValue : "";
+  return <select {...props} className={className}>
+    <option value="">Select district</option>
+    {selectedDistrict && !districts.includes(selectedDistrict) && <option value={selectedDistrict}>{selectedDistrict}</option>}
+    {districts.map(district => <option key={district} value={district}>{district}</option>)}
+  </select>;
+}
+
+function PurokDropdown({ className = "", ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
+  const selectedPurok = typeof props.value === "string"
+    ? props.value
+    : typeof props.defaultValue === "string" ? props.defaultValue : "";
+  return <select {...props} className={className}>
+    <option value="">Select purok (optional)</option>
+    {selectedPurok && !Array.from({ length: 10 }, (_, index) => String(index + 1)).includes(selectedPurok) &&
+      <option value={selectedPurok}>{selectedPurok}</option>}
+    {Array.from({ length: 10 }, (_, index) => String(index + 1)).map(purok => <option key={purok} value={purok}>Purok {purok}</option>)}
+  </select>;
+}
+
 function Login({ portal, onLogin, onRegister, error, busy }: { portal: Portal; onLogin: (event: FormEvent<HTMLFormElement>) => void; onRegister: (event: FormEvent<HTMLFormElement>) => void; error: string; busy: boolean }) {
   if (portal === "resident") return <ResidentAuth onLogin={onLogin} onRegister={onRegister} error={error} busy={busy} />;
   const isWater = portal === "water";
@@ -198,7 +413,7 @@ function Login({ portal, onLogin, onRegister, error, busy }: { portal: Portal; o
     <section className={`login-art relative flex min-h-[260px] flex-col justify-between overflow-hidden bg-gradient-to-br from-rose-900 via-rose-700 to-rose-600 p-7 text-white sm:p-10 lg:min-h-screen lg:px-16 ${isWater ? "auth-water" : ""}`}>
       <Brand portal={portal} />
       <div className="relative z-10 my-auto max-w-lg py-10"><p className="mb-3 text-xs font-bold tracking-[.16em] text-rose-200">{copy("copy_0310fc064cb0")}</p><h1 className="mb-4 text-4xl font-extrabold leading-tight tracking-tight sm:text-5xl">{isWater ? copy("copy_8344ba8731a9") : copy("copy_c39c90b8a3a9")}</h1><p className="max-w-md text-sm leading-7 text-white/80">{isCepalco ? copy("copy_914bb312bf61") : `Use your assigned ${settingsFor(portal).label} account to manage service advisories and community response.`}</p></div>
-      <div className="relative z-10 flex gap-8 text-xs text-white/75"><span><strong className="block text-lg text-white">{copy("copy_4d8974777af1")}</strong>{copy("copy_51d91d456fe8")}</span><span><strong className="block text-lg text-white">{copy("copy_4f7838402f37")}</strong>{copy("copy_dfcc74dff330")}</span></div>
+      <p className="relative z-10 m-0 text-xs text-white/75">Official utility announcements and resident service information.</p>
     </section>
     <section className="grid place-items-center px-6 py-12"><div className="w-full max-w-md">
       <p className="mb-2 text-[10px] font-extrabold tracking-[.16em] text-[var(--brand)]">{`${settingsFor(portal).label.toUpperCase()} SECURE ACCESS`}</p>
@@ -206,7 +421,7 @@ function Login({ portal, onLogin, onRegister, error, busy }: { portal: Portal; o
       <p className="mb-6 text-sm leading-6 text-slate-500">{copy("copy_8645e230969a")}</p>
       <form onSubmit={onLogin} className="space-y-4">
         <label className="block text-xs font-bold text-slate-700">{copy("copy_5726ba9b0cf2")}<input name="email" type="email" autoComplete="username" required placeholder={copy("copy_7a9b9768f336")} className="mt-2 block w-full rounded-lg border border-slate-200 px-3 py-3 text-sm font-normal outline-none focus:border-[var(--brand)]" /></label>
-        <label className="block text-xs font-bold text-slate-700">{copy("copy_e7cf3ef4f17c")}<input name="password" type="password" autoComplete="current-password" required placeholder={copy("copy_c06bf9670174")} className="mt-2 block w-full rounded-lg border border-slate-200 px-3 py-3 text-sm font-normal outline-none focus:border-[var(--brand)]" /></label>
+        <label className="block text-xs font-bold text-slate-700">{copy("copy_e7cf3ef4f17c")}<PasswordInput name="password" autoComplete="current-password" required placeholder={copy("copy_c06bf9670174")} className="mt-2 block w-full rounded-lg border border-slate-200 px-3 py-3 text-sm font-normal outline-none focus:border-[var(--brand)]" /></label>
         {error && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm text-rose-800">{error}</p>}
         <button disabled={busy} className="w-full rounded-lg bg-[var(--brand)] px-4 py-3 text-sm font-bold text-white hover:bg-[var(--brand-dark)] disabled:opacity-60">{busy ? copy("copy_8b9d3de8ae00") : copy("copy_7455c624c0b2")}</button>
       </form>
@@ -216,11 +431,15 @@ function Login({ portal, onLogin, onRegister, error, busy }: { portal: Portal; o
 }
 
 function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: FormEvent<HTMLFormElement>) => void; onRegister: (event: FormEvent<HTMLFormElement>) => void; error: string; busy: boolean }) {
-  const locationDefaults = requiredSetting(settingsFor("resident").locationDefaults, "resident.locationDefaults");
   const [mode, setMode] = useState<"login" | "register">("login");
   const [localError, setLocalError] = useState("");
+  const [loginEmail, setLoginEmail] = useState("");
+  const [resetMessage, setResetMessage] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [showRegistrationPassword, setShowRegistrationPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const strength = password.length >= 12 && /[A-Z]/.test(password) && /\d/.test(password) && /[^A-Za-z0-9]/.test(password)
     ? "Strong" : password.length >= 8 ? "Good" : password.length ? "Needs 8 characters" : "";
 
@@ -237,10 +456,37 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
   function switchMode(next: "login" | "register") {
     setMode(next);
     setLocalError(copy("copy_e3b0c44298fc"));
+    setResetMessage("");
     setPassword("");
     setConfirmPassword("");
+    setShowRegistrationPassword(false);
+    setShowConfirmPassword(false);
     const formContent = document.querySelector<HTMLElement>(".resident-auth-content");
     if (formContent) formContent.scrollTop = 0;
+  }
+
+  async function sendPasswordReset() {
+    const email = loginEmail.trim();
+    if (!email) {
+      setResetMessage("Enter your email address above, then select Forgot password.");
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setResetMessage("Enter a valid email address first.");
+      return;
+    }
+    setResetBusy(true);
+    setResetMessage("");
+    try {
+      const redirectTo = new URL("/?portal=resident&passwordRecovery=true", window.location.origin).toString();
+      const { error: resetError } = await getSupabase().auth.resetPasswordForEmail(email, { redirectTo });
+      if (resetError) throw new Error(resetError.message);
+      setResetMessage("If an account exists for that email, password reset instructions will be sent.");
+    } catch (resetError) {
+      setResetMessage(resetError instanceof Error ? resetError.message : "Could not request a password reset. Try again.");
+    } finally {
+      setResetBusy(false);
+    }
   }
 
   const inputClass = "block w-full rounded-xl border border-slate-300 bg-slate-50/60 px-3.5 py-3 text-sm font-medium text-slate-900 outline-none transition placeholder:text-slate-400 hover:border-slate-400 focus:bg-white focus:border-rose-600 focus:ring-4 focus:ring-rose-500/15";
@@ -302,55 +548,14 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
                 ))}
               </div>
             ) : (
-              <div className="space-y-4">
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-xl border border-white/10 bg-white/5 p-3.5 backdrop-blur-sm">
-                    <div className="flex items-center gap-2 text-xs font-bold text-amber-300">
-                      <Icon name="shield" className="h-4 w-4 text-amber-400" />
-                      CEPALCO Power Grid
-                    </div>
-                    <p className="mt-1 text-xs text-slate-300">Continuous feeder telemetry across 80 urban & rural barangays</p>
-                    <span className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">
-                      ● Active Dispatch
-                    </span>
-                  </div>
-
-                  <div className="rounded-xl border border-white/10 bg-white/5 p-3.5 backdrop-blur-sm">
-                    <div className="flex items-center gap-2 text-xs font-bold text-cyan-300">
-                      <Icon name="shield" className="h-4 w-4 text-cyan-400" />
-                      Water District (COWD)
-                    </div>
-                    <p className="mt-1 text-xs text-slate-300">Pressure maintenance & emergency pipe repair advisories</p>
-                    <span className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-cyan-500/10 px-2 py-0.5 text-[10px] font-semibold text-cyan-300">
-                      ● Live Feeds
-                    </span>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap gap-2 pt-2">
-                  <span className="rounded-lg border border-white/15 bg-white/10 px-3.5 py-1.5 text-xs font-semibold text-slate-200">
-                    {copy("copy_e678b8628ae8")}
-                  </span>
-                  <span className="rounded-lg border border-white/15 bg-white/10 px-3.5 py-1.5 text-xs font-semibold text-slate-200">
-                    {copy("copy_246e670cb71d")}
-                  </span>
-                </div>
-              </div>
+              <p className="max-w-md text-sm leading-relaxed text-slate-300">
+                Sign in to view current announcements and service information provided by your utility.
+              </p>
             )}
           </div>
 
           <div className="relative z-10 border-t border-white/10 pt-5">
-            <div className="mb-3 flex flex-wrap gap-8 text-xs text-slate-400">
-              <span>
-                <strong className="block text-lg font-bold text-white">{copy("copy_4d8974777af1")}</strong>
-                {copy("copy_51d91d456fe8")}
-              </span>
-              <span>
-                <strong className="block text-lg font-bold text-white">{copy("copy_8c31e6e72230")}</strong>
-                {copy("copy_dfcc74dff330")}
-              </span>
-            </div>
-            <p className="m-0 text-[11px] text-slate-400">{copy("copy_a3c1dd22eac2")}</p>
+            <p className="m-0 text-[11px] text-slate-400">Community Alert System resident portal.</p>
           </div>
         </aside>
 
@@ -407,19 +612,17 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
                     type="email"
                     autoComplete="username"
                     required
+                    value={loginEmail}
+                    onChange={event => { setLoginEmail(event.target.value); setResetMessage(""); }}
                     placeholder={copy("copy_7b17fb0bd173")}
                     className={`${inputClass} mt-1.5`}
                   />
                 </label>
 
                 <label className={labelClass}>
-                  <div className="flex items-center justify-between">
-                    <span>{copy("copy_e7cf3ef4f17c")}</span>
-                    <span className="text-[11px] font-normal text-slate-400 lowercase">{copy("copy_854fcaa4eae2")}</span>
-                  </div>
-                  <input
+                  <span>{copy("copy_e7cf3ef4f17c")}</span>
+                  <PasswordInput
                     name="password"
-                    type="password"
                     autoComplete="current-password"
                     required
                     placeholder={copy("copy_c06bf9670174")}
@@ -442,16 +645,18 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
                 </button>
               </form>
 
-              <p className="mt-5 text-center text-xs text-slate-600">
-                {copy("copy_5c5d4ae1083b")}
-                <button onClick={() => switchMode("register")} className="font-bold text-rose-700 hover:underline">
-                  {copy("copy_14272ede1c39")}
+              <div className="mt-5 text-center">
+                <button
+                  type="button"
+                  onClick={() => void sendPasswordReset()}
+                  disabled={resetBusy}
+                  className="text-xs font-bold text-rose-700 hover:underline disabled:opacity-60"
+                >
+                  {resetBusy ? "Sending reset instructions…" : "Forgot password?"}
                 </button>
-              </p>
+                {resetMessage && <p role="status" className="mt-2 text-xs text-slate-600">{resetMessage}</p>}
+              </div>
 
-              <p className="mt-4 border-t border-slate-100 pt-4 text-center text-xs text-slate-400">
-                {copy("copy_5df1da863fb0")}
-              </p>
             </>
           ) : (
             <>
@@ -520,7 +725,7 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
                         required
                         maxLength={240}
                         autoComplete="street-address"
-                        placeholder={copy("copy_43bc6228d8b4")}
+                        placeholder="Street, building, or house number"
                         className={`${inputClass} mt-1.5`}
                       />
                       <small className="mt-1 block text-[11px] font-normal text-slate-500">Enter your house, building, or street address. Select your purok separately below.</small>
@@ -530,12 +735,7 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
                       <label className={labelClass}>
                         {copy("copy_52630f30e6ef")}
                         <span className="text-rose-600 ml-1">{copy("copy_684888c0ebb1")}</span>
-                        <select name="barangay" required defaultValue="" autoComplete="address-level3" className={`${inputClass} mt-1.5`}>
-                          <option value="" disabled>{copy("copy_c3b5b226013a")}</option>
-                          {requiredSetting(settingsFor("resident").barangays, "resident.barangays").map(name => (
-                            <option key={name} value={name}>{name}</option>
-                          ))}
-                        </select>
+                        <ServiceAreaDropdown name="barangay" required autoComplete="address-level3" className={`${inputClass} mt-1.5`} />
                       </label>
 
                       <label className={labelClass}>
@@ -546,8 +746,7 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
                           required
                           maxLength={20}
                           autoComplete="postal-code"
-                          placeholder={locationDefaults.postalCode}
-                          defaultValue={locationDefaults.postalCode}
+                          placeholder="Postal code"
                           className={`${inputClass} mt-1.5`}
                         />
                       </label>
@@ -555,23 +754,15 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
 
                     <label className={labelClass}>
                       Purok <span className="font-normal normal-case text-slate-500">(optional)</span>
-                      <select name="purok" defaultValue="" className={`${inputClass} mt-1.5`}>
-                        <option value="">Not specified / no numbered purok</option>
-                        {ANNOUNCEMENT_PUROKS.map(number => <option key={number} value={number}>Purok {number}</option>)}
-                      </select>
-                      <small className="mt-1 block text-[11px] font-normal text-slate-500">Choose your purok to receive announcements targeted to that area.</small>
+                      <PurokDropdown name="purok" className={`${inputClass} mt-1.5`} />
+                      <small className="mt-1 block text-[11px] font-normal text-slate-500">Your service location is kept in your profile; utility announcements are sent to all residents.</small>
                     </label>
 
                     <div className="grid gap-3 sm:grid-cols-2">
                       <label className={labelClass}>
                         {copy("copy_338de443b2af")}
                         <span className="text-rose-600 ml-1">{copy("copy_684888c0ebb1")}</span>
-                        <select name="district" required defaultValue="" className={`${inputClass} mt-1.5`}>
-                          <option value={copy("copy_e3b0c44298fc")} disabled>{copy("copy_11aaa5f43d2b")}</option>
-                          {requiredSetting(settingsFor("resident").districts, "resident.districts").map(district => (
-                            <option key={district}>{district}</option>
-                          ))}
-                        </select>
+                        <DistrictDropdown name="district" required className={`${inputClass} mt-1.5`} />
                       </label>
 
                       <label className={labelClass}>
@@ -579,9 +770,9 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
                         <input
                           name="city"
                           required
-                          value={locationDefaults.city}
-                          readOnly
-                          className={`${inputClass} mt-1.5 bg-slate-100 text-slate-500`}
+                          maxLength={100}
+                          placeholder="City or municipality"
+                          className={`${inputClass} mt-1.5`}
                         />
                       </label>
                     </div>
@@ -589,37 +780,65 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
                 </fieldset>
 
                 <div className="grid gap-3 sm:grid-cols-2">
-                  <label className={labelClass}>
-                    {copy("copy_68ecf962332c")}
-                    <span className="text-rose-600 ml-1">{copy("copy_684888c0ebb1")}</span>
-                    <input
-                      name="password"
-                      type="password"
-                      required
-                      minLength={8}
-                      autoComplete="new-password"
-                      value={password}
-                      onChange={event => setPassword(event.target.value)}
-                      placeholder={copy("copy_977f3b2676a9")}
-                      className={`${inputClass} mt-1.5`}
-                    />
+                  <div>
+                    <label className={labelClass} htmlFor="resident-registration-password">
+                      {copy("copy_68ecf962332c")}
+                      <span className="text-rose-600 ml-1">{copy("copy_684888c0ebb1")}</span>
+                    </label>
+                    <div className="relative mt-1.5">
+                      <input
+                        id="resident-registration-password"
+                        name="password"
+                        type={showRegistrationPassword ? "text" : "password"}
+                        required
+                        minLength={8}
+                        autoComplete="new-password"
+                        value={password}
+                        onChange={event => setPassword(event.target.value)}
+                        placeholder={copy("copy_977f3b2676a9")}
+                        className={`${inputClass} pr-12`}
+                      />
+                      <button
+                        type="button"
+                        aria-label={showRegistrationPassword ? "Hide password" : "Show password"}
+                        aria-pressed={showRegistrationPassword}
+                        onClick={() => setShowRegistrationPassword(visible => !visible)}
+                        className="absolute inset-y-0 right-1 my-auto grid h-10 w-10 place-items-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+                      >
+                        <Icon name={showRegistrationPassword ? "eyeOff" : "eye"} className="h-5 w-5" />
+                      </button>
+                    </div>
                     <small className="mt-1 block text-[11px] font-normal text-slate-500">{copy("copy_aa7e8499fa62")}</small>
-                  </label>
+                  </div>
 
-                  <label className={labelClass}>
-                    {copy("copy_b186ebc5096d")}
-                    <span className="text-rose-600 ml-1">{copy("copy_684888c0ebb1")}</span>
-                    <input
-                      name="confirmPassword"
-                      type="password"
-                      required
-                      minLength={8}
-                      autoComplete="new-password"
-                      value={confirmPassword}
-                      onChange={event => setConfirmPassword(event.target.value)}
-                      placeholder={copy("copy_210dfc7e4536")}
-                      className={`${inputClass} mt-1.5`}
-                    />
+                  <div>
+                    <label className={labelClass} htmlFor="resident-confirm-password">
+                      {copy("copy_b186ebc5096d")}
+                      <span className="text-rose-600 ml-1">{copy("copy_684888c0ebb1")}</span>
+                    </label>
+                    <div className="relative mt-1.5">
+                      <input
+                        id="resident-confirm-password"
+                        name="confirmPassword"
+                        type={showConfirmPassword ? "text" : "password"}
+                        required
+                        minLength={8}
+                        autoComplete="new-password"
+                        value={confirmPassword}
+                        onChange={event => setConfirmPassword(event.target.value)}
+                        placeholder={copy("copy_210dfc7e4536")}
+                        className={`${inputClass} pr-12`}
+                      />
+                      <button
+                        type="button"
+                        aria-label={showConfirmPassword ? "Hide confirmation password" : "Show confirmation password"}
+                        aria-pressed={showConfirmPassword}
+                        onClick={() => setShowConfirmPassword(visible => !visible)}
+                        className="absolute inset-y-0 right-1 my-auto grid h-10 w-10 place-items-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+                      >
+                        <Icon name={showConfirmPassword ? "eyeOff" : "eye"} className="h-5 w-5" />
+                      </button>
+                    </div>
                     <div className="mt-1 flex items-center justify-between">
                       <small className="text-[11px] font-semibold text-slate-600">
                         {strength ? `Strength: ${strength}` : copy("copy_551df75ec882")}
@@ -639,7 +858,7 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
                         }`}
                       />
                     </div>
-                  </label>
+                  </div>
                 </div>
 
                 {(error || localError) && (
@@ -656,16 +875,11 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
                       <strong className="text-rose-700 ml-1">{copy("copy_add882140045")}</strong>
                       <details className="mt-2 rounded-lg border border-slate-200 bg-white p-2.5 text-[11px] leading-5">
                         <summary className="cursor-pointer font-semibold text-slate-700">Read the Terms and Conditions</summary>
-                        <p className="mb-1 mt-2">Community Alert System (CAS) provides water and electricity interruption notices and related resident services. Keep your contact details and service address accurate so notices can be matched to your area.</p>
-                        <p className="mb-1">Your email is used for advisory notifications. Your mobile number is used only to create simulated SMS records in this system; no text message is sent. Announcements may also be published on the responsible utility provider’s official social media accounts.</p>
+                        <p className="mb-1 mt-2">Community Alert System (CAS) provides utility interruption notices and resident services. Keep your contact details and service address accurate so notices can be matched to your area.</p>
+                        <p className="mb-1">Your email is used for advisory notifications. The Resident portal creates a simulated inbox alert for every resident account when a utility publishes an advisory; no SMS text is sent to mobile phones. Announcements may also be published on the responsible utility provider’s official social media accounts.</p>
                         <p className="mb-0">Use the system lawfully and provide accurate information. Community Alert System (CAS) shares service information and does not replace the utility provider’s official authority. Your acceptance time is recorded with your account.</p>
                       </details>
                     </span>
-                  </label>
-
-                  <label className="flex items-start gap-2.5 text-xs text-slate-700 cursor-pointer">
-                    <input name="smsAlerts" type="checkbox" defaultChecked className="mt-0.5 h-4 w-4 rounded accent-rose-600" />
-                    <span>{copy("copy_e2d06d28e9c3")}</span>
                   </label>
 
                   <p className="m-0 pl-6 text-slate-500 text-[11px]">{copy("mandatoryAdvisoryEmailInfo")}</p>
@@ -700,33 +914,126 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
   </main>;
 }
 
+function ResidentPasswordRecovery({ onReturnToLogin }: { onReturnToLogin: () => void }) {
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [complete, setComplete] = useState(false);
+  const inputClass = "block w-full rounded-xl border border-slate-300 bg-slate-50/60 px-3.5 py-3 text-sm font-medium text-slate-900 outline-none placeholder:text-slate-400 focus:border-rose-600 focus:bg-white focus:ring-4 focus:ring-rose-500/15";
+
+  async function updatePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (password !== confirmPassword) {
+      setError("The passwords do not match.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const { error: updateError } = await getSupabase().auth.updateUser({ password });
+      if (updateError) throw new Error(updateError.message);
+      const { error: signOutError } = await getSupabase().auth.signOut();
+      if (signOutError) throw new Error(signOutError.message);
+      setComplete(true);
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : "Could not update your password. Request a new reset link and try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <main className="resident-auth grid min-h-screen place-items-center bg-slate-950 p-4 text-slate-900">
+    <section className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl sm:p-10">
+      <p className="mb-2 text-xs font-extrabold uppercase tracking-wider text-rose-700">Resident account</p>
+      <h1 className="mb-2 text-2xl font-extrabold">{complete ? "Password updated" : "Choose a new password"}</h1>
+      {complete ? <>
+        <p role="status" className="mb-6 text-sm text-slate-600">Your password has been changed. Sign in with your new password.</p>
+        <button type="button" onClick={onReturnToLogin} className="w-full rounded-xl bg-rose-700 px-4 py-3 text-sm font-bold text-white hover:bg-rose-800">Return to sign in</button>
+      </> : <>
+        <p className="mb-6 text-sm text-slate-600">Enter and confirm your new password.</p>
+        <form onSubmit={updatePassword} className="space-y-4">
+          <label className="block text-xs font-bold text-slate-700" htmlFor="recovery-password">New password
+            <PasswordInput id="recovery-password" autoComplete="new-password" minLength={8} required value={password} onChange={event => setPassword(event.target.value)} className={`${inputClass} mt-1.5`} />
+          </label>
+          <label className="block text-xs font-bold text-slate-700" htmlFor="recovery-confirm-password">Confirm new password
+            <PasswordInput id="recovery-confirm-password" autoComplete="new-password" minLength={8} required value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} className={`${inputClass} mt-1.5`} />
+          </label>
+          {error && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3.5 text-xs font-semibold text-rose-800">{error}</p>}
+          <button type="submit" disabled={busy} className="w-full rounded-xl bg-rose-700 px-4 py-3 text-sm font-bold text-white hover:bg-rose-800 disabled:opacity-60">{busy ? "Updating password…" : "Update password"}</button>
+        </form>
+      </>}
+    </section>
+  </main>;
+}
+
 function App({ portal }: { portal: Portal }) {
+  const [darkMode, setDarkMode] = useState(() => localStorage.getItem("civicalert:theme") === "dark");
   const [token, setToken] = useState<string | null>(null);
   const [actor, setActor] = useState<Actor | null>(null);
+  const [passwordRecovery, setPasswordRecovery] = useState(() =>
+    portal === "resident" && new URLSearchParams(location.search).get("passwordRecovery") === "true");
   const [page, setPage] = useState(() => {
     const requestedPage = new URLSearchParams(location.search).get("page") || "overview";
-    return requestedPage === "scheduled" && portal !== "resident" ? "overview" : requestedPage;
+    return portalPageAvailable(portal, requestedPage) ? requestedPage : "overview";
   });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [items, setItems] = useState<{ advisories: Advisory[]; workOrders: WorkOrder[]; reports: ServiceReport[]; network: NetworkReading[] }>({ advisories: [], workOrders: [], reports: [], network: [] });
-  const [toast, setToast] = useState("");
+  const [workspaceErrors, setWorkspaceErrors] = useState<WorkspaceErrors>({});
+  const [toast, setToast] = useState<PortalNotification | null>(null);
   const [modal, setModal] = useState<"advisory" | "work" | null>(null);
   const [profileImage, setProfileImage] = useState<string | null>(null);
   const [mobileMenu, setMobileMenu] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [retryingInstagramAdvisoryId, setRetryingInstagramAdvisoryId] = useState<number | null>(null);
+  const [publishConfirmation, setPublishConfirmation] = useState<string | null>(null);
   const [inbox, setInbox] = useState<SMSRecord[]>([]);
+  const pendingPublishConfirmation = useRef<((confirmed: boolean) => void) | null>(null);
   const [publishedDelivery, setPublishedDelivery] = useState<{ advisoryId: number; summary: EmailDeliverySummary } | null>(null);
-  const [publishedSocialDelivery, setPublishedSocialDelivery] = useState<{ advisoryId: number; summary: SocialDeliverySummary } | null>(null);
   const [retryingEmail, setRetryingEmail] = useState(false);
   const isResident = portal === "resident";
+
+  useEffect(() => {
+    localStorage.setItem("civicalert:theme", darkMode ? "dark" : "light");
+  }, [darkMode]);
+
+  useEffect(() => {
+    const requestedPage = new URLSearchParams(location.search).get("page") || "overview";
+    if (!portalPageAvailable(portal, requestedPage)) {
+      history.replaceState({}, "", `/?portal=${portal}&view=portal`);
+    }
+  }, [portal]);
+
+  function notify(
+    message: string,
+    type: "success" | "error" = "success",
+    links?: Array<{ label: string; url: string }>,
+    retryInstagramAdvisoryId?: number,
+  ) {
+    const notification: PortalNotification = {
+      message,
+      type,
+      ...(links?.length ? { links } : {}),
+      ...(retryInstagramAdvisoryId ? { retryInstagramAdvisoryId } : {}),
+    };
+    setError("");
+    setToast(notification);
+  }
+
+  useEffect(() => {
+    if (!toast || toast.retryInstagramAdvisoryId) return;
+    const timeout = window.setTimeout(() => setToast(null), toast.type === "error" ? 12000 : 8000);
+    return () => window.clearTimeout(timeout);
+  }, [toast]);
 
   useEffect(() => {
     let active = true;
     try {
       const supabase = getSupabase();
-      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
         if (!active) return;
+        if (portal === "resident" && event === "PASSWORD_RECOVERY") setPasswordRecovery(true);
         const accessToken = session?.access_token ?? null;
         setToken(accessToken);
         if (accessToken) {
@@ -756,7 +1063,7 @@ function App({ portal }: { portal: Portal }) {
 
   useEffect(() => {
     if (token && actor) void loadWorkspace();
-  }, [token, actor, page]);
+  }, [token, actor]);
 
   useEffect(() => {
     if (!token) return;
@@ -789,7 +1096,7 @@ function App({ portal }: { portal: Portal }) {
       google_error: "Google rejected the authorization request. Check the consent screen, test-user access, and Gmail API setup.",
     };
     const gmailError = query.get("gmailError");
-    setToast(gmailResult === "connected"
+    notify(gmailResult === "connected"
       ? "Official Gmail account connected."
       : gmailErrors[gmailError ?? ""] ?? "Gmail connection did not complete. Check OAuth configuration and try again.");
     query.delete("gmail");
@@ -800,28 +1107,45 @@ function App({ portal }: { portal: Portal }) {
 
   async function loadWorkspace() {
     setLoading(true);
-    try {
-      if (isResident) {
-        const [advisories, workOrders] = await Promise.all([
-          localAction<Advisory[]>(portal, "/advisories", token),
-          localAction<WorkOrder[]>(portal, "/work-orders", token),
-        ]);
-        setItems({ advisories, reports: [], workOrders, network: [] });
-      } else {
-        const [advisories, workOrders, network] = await Promise.all([
-          localAction<Advisory[]>(portal, "/advisories", token),
-          localAction<WorkOrder[]>(portal, "/work-orders", token),
-          portal === "water" ? localAction<NetworkReading[]>(portal, "/network", token) : Promise.resolve([]),
-        ]);
-        setItems({ advisories, workOrders, reports: [], network });
-      }
-      setInbox(isResident ? await localAction<SMSRecord[]>(portal, "/inbox", token) : []);
-      setError(copy("copy_e3b0c44298fc"));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : copy("copy_e583d95bd720"));
-    } finally {
-      setLoading(false);
+    const [advisoriesResult, workOrdersResult, reportsResult, networkResult, inboxResult] = await Promise.allSettled([
+      localAction<Advisory[]>(portal, "/advisories", token),
+      localAction<WorkOrder[]>(portal, "/work-orders", token),
+      localAction<ServiceReport[]>(portal, "/reports", token),
+      portal === "water" ? localAction<NetworkReading[]>(portal, "/network", token) : Promise.resolve([] as NetworkReading[]),
+      isResident ? localAction<SMSRecord[]>(portal, "/inbox", token) : Promise.resolve([] as SMSRecord[]),
+    ]);
+    const errors: WorkspaceErrors = {};
+    const nextItems = { ...items };
+    if (advisoriesResult.status === "fulfilled") nextItems.advisories = advisoriesResult.value;
+    else errors.advisories = workspaceErrorMessage(advisoriesResult.reason);
+    if (workOrdersResult.status === "fulfilled") nextItems.workOrders = workOrdersResult.value;
+    else errors["work orders"] = workspaceErrorMessage(workOrdersResult.reason);
+    if (reportsResult.status === "fulfilled") nextItems.reports = reportsResult.value;
+    else errors["resident reports"] = workspaceErrorMessage(reportsResult.reason);
+    if (networkResult.status === "fulfilled") nextItems.network = networkResult.value;
+    else errors["network readings"] = workspaceErrorMessage(networkResult.reason);
+    if (inboxResult.status === "fulfilled") {
+      if (isResident) setInbox(inboxResult.value);
     }
+    else if (isResident) errors.inbox = workspaceErrorMessage(inboxResult.reason);
+    setItems(nextItems);
+    setWorkspaceErrors(errors);
+    if (!Object.keys(errors).length) setError(copy("copy_e3b0c44298fc"));
+    setLoading(false);
+  }
+
+  function requestPublishConfirmation(message: string): Promise<boolean> {
+    return new Promise(resolve => {
+      pendingPublishConfirmation.current = resolve;
+      setPublishConfirmation(message);
+    });
+  }
+
+  function resolvePublishConfirmation(confirmed: boolean) {
+    const resolve = pendingPublishConfirmation.current;
+    pendingPublishConfirmation.current = null;
+    setPublishConfirmation(null);
+    resolve?.(confirmed);
   }
 
   async function login(event: FormEvent<HTMLFormElement>) {
@@ -854,7 +1178,7 @@ function App({ portal }: { portal: Portal }) {
         city: data.get("city"),
         postalCode: data.get("postalCode"),
         termsAccepted: data.get("termsAccepted") === "on",
-        smsAlerts: data.get("smsAlerts") === "on",
+        smsAlerts: true,
       }) });
       localStorage.setItem(`civicalert:${portal}:account`, response.token);
       setActor(response.actor); setToken(response.token);
@@ -864,6 +1188,7 @@ function App({ portal }: { portal: Portal }) {
   }
 
   function navigate(nextPage: string) {
+    if (!portalPageAvailable(portal, nextPage)) return;
     setPage(nextPage); setMobileMenu(false);
     history.pushState({}, "", `/?portal=${portal}&view=portal&page=${nextPage}`);
   }
@@ -880,6 +1205,7 @@ function App({ portal }: { portal: Portal }) {
         { method: "POST", body: JSON.stringify({}) },
       );
       setPublishedDelivery({ ...publishedDelivery, summary });
+      notify(advisoryPublishMessage("", summary), summary.failed > 0 || summary.status === "no_recipients" ? "error" : "success");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not retry email delivery.");
     } finally {
@@ -897,8 +1223,7 @@ function App({ portal }: { portal: Portal }) {
     try {
       await localAction(portal, endpoint, token, { method: "POST", body: JSON.stringify(body) });
       setModal(null);
-      setToast(modal === "advisory" ? copy("copy_281a95eb4f15") : copy("copy_05c2120eac8d"));
-      window.setTimeout(() => setToast(copy("copy_e3b0c44298fc")), 3200);
+      notify(modal === "advisory" ? copy("copy_281a95eb4f15") : copy("copy_05c2120eac8d"));
       await loadWorkspace();
     } catch (err) { setError(err instanceof Error ? err.message : copy("copy_abdb0d7935bb")); }
   }
@@ -908,43 +1233,51 @@ function App({ portal }: { portal: Portal }) {
     if ((portal !== "cepalco" && portal !== "water") || !token) return;
     setBusy(true);
     setError("");
+    setToast(null);
     setPublishedDelivery(null);
-    setPublishedSocialDelivery(null);
     const form = new FormData(event.currentTarget);
     try {
-      const imageDataUrl = await readAnnouncementImage(form.get("announcementImage"));
+      const serviceStartsAt = String(form.get("serviceStartsAt") || "");
+      const estimatedRestorationAt = String(form.get("estimatedRestorationAt") || "");
+      if (serviceStartsAt && estimatedRestorationAt &&
+          new Date(serviceStartsAt).getTime() === new Date(estimatedRestorationAt).getTime()) {
+        throw new Error("Advisory start and estimated restoration times cannot be the same.");
+      }
+      const imageDataUrls = await readAnnouncementImages(form.getAll("announcementImages"));
       const selectedChannels = [...new Set(form.getAll("channels").map(String))];
       if (selectedChannels.length === 0) {
         throw new Error("Select at least one announcement channel.");
       }
-      if (selectedChannels.some(channel => ["facebook", "instagram", "gmail"].includes(channel)) && !imageDataUrl) {
+      if (selectedChannels.some(channel => ["facebook", "instagram", "gmail"].includes(channel)) && imageDataUrls.length === 0) {
         throw new Error("Add an announcement image before publishing to Facebook, Instagram, or Gmail.");
       }
       const area = String(form.get("area") || "");
-      const estimate = await localAction<{
-        emailRecipients: number;
-        smsRecipients: number;
-        totalResidentAccounts: number;
-        residentsMissingBarangay: number;
-      }>(portal, `/advisories/recipient-estimate?area=${encodeURIComponent(area)}`, token);
+      const estimate = await localAction<{ emailRecipients: number }>(portal, "/advisories/recipient-estimate", token);
       const scheduledAtInput = String(form.get("scheduledAt") || "");
       const publishTime = scheduledAtInput ? `Scheduled for ${formatResidentDateTime(new Date(scheduledAtInput).toISOString())}` : "Publish immediately";
       const audience = [
-        selectedChannels.includes("gmail") ? `Gmail: ${estimate.emailRecipients} eligible residents in this area (${estimate.totalResidentAccounts} resident accounts total)` : null,
-        selectedChannels.includes("sms") ? `Simulated SMS inbox: ${estimate.smsRecipients} residents with a phone number and SMS enabled` : null,
-        (selectedChannels.includes("gmail") || selectedChannels.includes("sms")) && estimate.residentsMissingBarangay > 0
-          ? `Warning: ${estimate.residentsMissingBarangay} resident profile(s) have no barangay and will not receive area-targeted email or SMS until their location is added.`
-          : null,
+        selectedChannels.includes("gmail") ? `Gmail: ${estimate.emailRecipients} registered residents across all areas` : null,
         selectedChannels.includes("facebook") ? "Facebook: official utility page" : null,
         selectedChannels.includes("instagram") ? "Instagram: official utility account" : null,
       ].filter(Boolean).join("\n");
-      const preview = `Review ${portal === "water" ? "Water District" : "CEPALCO"} advisory\n\n${String(form.get("title") || "(No headline)")}\nAffected barangays / puroks: ${area || "(None listed)"}\n\n${String(form.get("details") || "")}\n\n${publishTime}\nMatched recipients and channels:\n${audience}\n\nConfirm to save and publish this advisory.`;
-      if (!window.confirm(preview)) return;
+      const noticePreview = [
+        `Location: ${String(form.get("location") || "(Not provided)")}`,
+        `Type of Service: ${String(form.get("category") || "(Not provided)")}`,
+        `Status: ${String(form.get("serviceStatus") || "(Not provided)")}`,
+        `Affecting Area: ${area || "(None listed)"}`,
+        `Scheduled Start: ${serviceStartsAt ? formatResidentDateTime(serviceStartsAt) : "(Not provided)"}`,
+        `Estimated Restoration: ${estimatedRestorationAt ? formatResidentDateTime(estimatedRestorationAt) : "(Not provided)"}`,
+        `Provider: ${String(form.get("provider") || "(Not provided)")}`,
+        `Description: ${String(form.get("details") || "(Not provided)")}`,
+      ].join("\n");
+      const preview = `Review ${portal === "water" ? "Water District" : "CEPALCO"} advisory\n\n${String(form.get("title") || "(No headline)")}\n${noticePreview}\nAudience: all registered residents\n\n${publishTime}\nChannels:\n${audience}\n\nConfirm to save and publish this advisory.`;
+      if (!await requestPublishConfirmation(preview)) return;
       const published = await localAction<{
         id: number;
         scheduledAt: string | null;
         facebookUrl?: string | null;
         instagramUrl?: string | null;
+        socialLinks?: string[];
         emailDelivery?: EmailDeliverySummary | null;
         socialDelivery?: SocialDeliverySummary | null;
         smsQueued?: number;
@@ -954,13 +1287,16 @@ function App({ portal }: { portal: Portal }) {
           title: form.get("title"),
           area: form.get("area"),
           type: form.get("category"),
+          location: form.get("location"),
+          serviceStatus: form.get("serviceStatus"),
+          provider: form.get("provider"),
           priority: form.get("priority"),
-          serviceStartsAt: form.get("serviceStartsAt") || null,
-          estimatedRestorationAt: form.get("estimatedRestorationAt") || null,
+          serviceStartsAt: serviceStartsAt || null,
+          estimatedRestorationAt: estimatedRestorationAt || null,
           details: form.get("details"),
           latitude: form.get("latitude") || null,
           longitude: form.get("longitude") || null,
-          imageDataUrl,
+          imageDataUrls,
           channels: selectedChannels,
           scheduledAt: scheduledAtInput ? new Date(scheduledAtInput).toISOString() : null,
         }),
@@ -970,32 +1306,55 @@ function App({ portal }: { portal: Portal }) {
       } else {
         setPublishedDelivery(null);
       }
-      setPublishedSocialDelivery(published.socialDelivery
-        ? { advisoryId: published.id, summary: published.socialDelivery }
-        : null);
       if (published.scheduledAt) {
-        setToast(`Announcement scheduled for ${formatResidentDateTime(published.scheduledAt)}. No channel deliveries will start before then.`);
+        notify(`Announcement scheduled for ${formatResidentDateTime(published.scheduledAt)}. No channel deliveries will start before then.`);
       } else {
         const deliveryResults: string[] = [];
         if (selectedChannels.includes("gmail")) {
           const summary = published.emailDelivery;
-          deliveryResults.push(`Gmail: ${summary?.sent ? `${summary.sent} sent${summary.failed ? `, ${summary.failed} failed` : ""}` : summary?.failed ? `${summary.failed} failed` : summary?.status === "no_recipients" ? `not sent; no resident profiles match ${area}` : "not sent"}`);
+          deliveryResults.push(`Gmail: ${summary?.sent ? `${summary.sent} sent${summary.failed ? `, ${summary.failed} failed` : ""}` : summary?.failed ? `${summary.failed} failed` : summary?.status === "no_recipients" ? "not sent; no resident accounts are available" : "not sent"}`);
         }
+        const publishedPostLinks = (published.socialDelivery?.platforms ?? []).flatMap(platform => {
+          const socialLinkPrefix = platform.platform === "instagram" ? "Instagram: " : "Facebook: ";
+          const socialLink = published.socialLinks?.find(link => link.startsWith(socialLinkPrefix))?.slice(socialLinkPrefix.length);
+          const fallbackUrl = platform.platform === "instagram"
+            ? published.instagramUrl || socialLink
+            : published.facebookUrl || socialLink;
+          const url = platform.permalinkUrl || fallbackUrl;
+          const validUrl = platform.platform === "instagram"
+            ? /^https:\/\/(?:www\.)?instagram\.com\//.test(url ?? "")
+            : /^https:\/\/(?:www\.)?facebook\.com\//.test(url ?? "");
+          if (platform.status !== "published" || !url || !validUrl) return [];
+          return [{
+            label: `View ${platform.platform === "instagram" ? "Instagram" : "Facebook"} post`,
+            url,
+          }];
+        });
         for (const platform of published.socialDelivery?.platforms ?? []) {
-          deliveryResults.push(`${platform.platform}: ${platform.status}${platform.permalinkUrl ? ` — ${platform.permalinkUrl}` : ""}${platform.message ? ` (${platform.message})` : ""}`);
+          deliveryResults.push(`${platform.platform}: ${platform.status}${platform.message ? ` (${platform.message})` : ""}`);
         }
-        if (selectedChannels.includes("sms")) {
-          deliveryResults.push(published.smsQueued
-            ? `SMS: simulated inbox alert for ${published.smsQueued} resident(s)`
-            : "SMS: no opted-in residents with phone numbers; no text was sent");
-        }
-        setToast(`Announcement saved. ${deliveryResults.join("; ")}`);
+        const hasDeliveryFailure = published.socialDelivery?.platforms.some(platform => platform.status !== "published") || Boolean(published.emailDelivery?.failed);
+        const outcome = hasDeliveryFailure
+          ? "Announcement saved, but one or more channels need attention."
+          : "Announcement published successfully.";
+        const instagramFailed = selectedChannels.includes("instagram") &&
+          published.socialDelivery?.platforms.some(platform => platform.platform === "instagram" && platform.status !== "published");
+        const instagramLinkMissing = selectedChannels.includes("instagram") &&
+          published.socialDelivery?.platforms.some(platform => platform.platform === "instagram" && platform.status === "published") &&
+          !publishedPostLinks.some(link => link.label === "View Instagram post");
+        if (instagramLinkMissing) deliveryResults.push("Instagram post link: Meta did not return a permalink yet. Open the advisory and use “Retry Instagram” to retrieve it.");
+        const retryInstagramAdvisoryId = instagramFailed || instagramLinkMissing ? published.id : undefined;
+        notify(
+          [outcome, ...deliveryResults.map(result => `- ${result}`)].join("\n"),
+          hasDeliveryFailure ? "error" : "success",
+          publishedPostLinks,
+          retryInstagramAdvisoryId,
+        );
       }
-      window.setTimeout(() => setToast(""), 5000);
       await loadWorkspace();
       navigate("incidents");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not publish announcement.");
+      notify(err instanceof Error ? err.message : "Could not publish announcement.", "error");
     } finally {
       setBusy(false);
     }
@@ -1009,11 +1368,60 @@ function App({ portal }: { portal: Portal }) {
         method: "PATCH",
         body: JSON.stringify({ status: nextStatus }),
       });
-      setToast(copy("copy_630120fb8f96").replace("{status}", nextStatus));
-      window.setTimeout(() => setToast(copy("copy_e3b0c44298fc")), 3200);
+      notify(copy("copy_630120fb8f96").replace("{status}", nextStatus));
       await loadWorkspace();
     } catch (err) {
       setError(err instanceof Error ? err.message : copy("copy_fc9a5a3ff0fc"));
+    }
+  }
+
+  async function publishInstagramForAdvisory(item: Advisory | number) {
+    if (!token || (portal !== "cepalco" && portal !== "water")) return;
+    const advisoryId = typeof item === "number" ? item : item.id;
+    setError("");
+    setRetryingInstagramAdvisoryId(advisoryId);
+    try {
+      const result = await localAction<SocialDeliverySummary & { socialLinks?: string[] }>(
+        portal,
+        `/advisories/${advisoryId}/social-publish`,
+        token,
+        { method: "POST", body: JSON.stringify({ platforms: ["instagram"] }) },
+      );
+      const instagram = result.platforms.find(platform => platform.platform === "instagram");
+      const savedInstagramLink = result.socialLinks?.find(link => link.startsWith("Instagram: https://"))
+        ?.slice("Instagram: ".length);
+      const instagramUrl = instagram?.permalinkUrl || savedInstagramLink;
+      const links = instagram?.status === "published" && instagramUrl &&
+        /^https:\/\/(?:www\.)?instagram\.com\//.test(instagramUrl)
+        ? [{ label: "Open Instagram post", url: instagramUrl }]
+        : undefined;
+      if (instagram?.status === "published") {
+        const linkMissing = !links;
+        notify(
+          links
+            ? "Instagram post is published. Use the link below to view it."
+            : "Instagram is published, but its link is not available yet. Retry to retrieve the permalink.",
+          "success",
+          links,
+          linkMissing ? advisoryId : undefined,
+        );
+      } else {
+        const reason = instagram?.message || instagram?.status || "publishing failed.";
+        const accessTokenError = /decrypted|access token/i.test(reason);
+        const tokenName = portal === "water"
+          ? "META_INSTAGRAM_ACCESS_TOKEN or WATER_META_INSTAGRAM_ACCESS_TOKEN"
+          : "CEPALCO_META_INSTAGRAM_ACCESS_TOKEN";
+        const guidance = accessTokenError
+          ? ` Set a valid ${tokenName} in the API environment, restart that API, then retry. No post link exists until Instagram publishing succeeds.`
+          : "";
+        notify(`Instagram could not be published: ${reason}${guidance}`, "error", undefined, advisoryId);
+      }
+      await loadWorkspace();
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "Could not publish this advisory to Instagram.";
+      notify(`Could not publish this advisory to Instagram: ${reason}`, "error", undefined, advisoryId);
+    } finally {
+      setRetryingInstagramAdvisoryId(null);
     }
   }
 
@@ -1026,8 +1434,7 @@ function App({ portal }: { portal: Portal }) {
         method: "PATCH",
         body: JSON.stringify({ status: nextStatus }),
       });
-      setToast(copy("copy_a3fb79f419d5").replace("{status}", nextStatus));
-      window.setTimeout(() => setToast(copy("copy_e3b0c44298fc")), 3200);
+      notify(copy("copy_a3fb79f419d5").replace("{status}", nextStatus));
       await loadWorkspace();
     } catch (err) {
       setError(err instanceof Error ? err.message : copy("copy_c1c828c37712"));
@@ -1052,7 +1459,7 @@ function App({ portal }: { portal: Portal }) {
           district: form.get("district"),
           city: form.get("city"),
           postalCode: form.get("postalCode"),
-          smsAlerts: form.get("smsAlerts") === "on",
+          smsAlerts: true,
           maintenanceAlerts: form.get("maintenanceAlerts") === "on",
           emailDigest: form.get("emailDigest") === "on",
           profileImage: profileImage === null ? actor.profileImage ?? null : profileImage || null,
@@ -1060,8 +1467,7 @@ function App({ portal }: { portal: Portal }) {
       });
       setActor(response.actor);
       setProfileImage(null);
-      setToast(copy("copy_8a2ad73ece0c"));
-      window.setTimeout(() => setToast(copy("copy_e3b0c44298fc")), 3200);
+      notify(copy("copy_8a2ad73ece0c"));
     } catch (err) {
       setError(err instanceof Error ? err.message : copy("copy_c2da79d0971c"));
     } finally { setBusy(false); }
@@ -1086,8 +1492,7 @@ function App({ portal }: { portal: Portal }) {
         body: JSON.stringify({ currentPassword, newPassword }),
       });
       formElement.reset();
-      setToast(copy("copy_00e34a98f659"));
-      window.setTimeout(() => setToast(copy("copy_e3b0c44298fc")), 3200);
+      notify(copy("copy_00e34a98f659"));
     } catch (err) {
       setError(err instanceof Error ? err.message : copy("copy_7eb1480a3453"));
     } finally { setBusy(false); }
@@ -1099,6 +1504,14 @@ function App({ portal }: { portal: Portal }) {
     setActor(null); setToken(null); setItems({ advisories: [], workOrders: [], reports: [], network: [] });
     history.replaceState({}, "", `/?portal=${portal}`);
   }
+
+  if (isResident && passwordRecovery) return <ResidentPasswordRecovery onReturnToLogin={() => {
+    setPasswordRecovery(false);
+    setActor(null);
+    setToken(null);
+    localStorage.removeItem(`civicalert:${portal}:account`);
+    history.replaceState({}, "", `/?portal=${portal}`);
+  }} />;
 
   if (!token || !actor) return <Login portal={portal} onLogin={login} onRegister={register} error={error} busy={busy} />;
 
@@ -1114,54 +1527,80 @@ function App({ portal }: { portal: Portal }) {
   const newButton = currentSettings.publishButtonLabel;
   const sectionItems = page === "residents" ? items.reports : advisories;
 
-  return <main className={`portal-${portal} min-h-screen`}>
+  return <main className={`portal-${portal} min-h-screen ${darkMode ? "portal-dark" : ""}`}>
     <header className="portal-header sticky top-0 z-20 flex h-16 items-center justify-between border-b border-slate-200 bg-white px-4 sm:px-7">
-      <div className="flex items-center gap-3"><button onClick={() => setMobileMenu(!mobileMenu)} className="rounded-lg border border-slate-200 p-2 text-slate-600 lg:hidden" aria-label={copy("copy_dfc1e6d16ba5")}>{copy("copy_67cfd5703605")}</button><Brand portal={portal} /></div>
+      <div className="flex items-center gap-3"><button type="button" onClick={() => setMobileMenu(!mobileMenu)} className="rounded-lg border border-slate-200 p-2 text-slate-600 lg:hidden" aria-label={mobileMenu ? "Close menu" : "Open menu"} aria-expanded={mobileMenu} aria-controls="portal-navigation">{copy("copy_67cfd5703605")}</button><Brand portal={portal} /></div>
       <div className="flex items-center gap-3 sm:gap-4">
         <span className="hidden text-xs text-slate-500 sm:inline">{copy("copy_7a34ff85344e")}</span>
-        {isResident && <button type="button" onClick={() => navigate("inbox")} aria-label="Virtual SMS inbox" title="Virtual SMS inbox" className="relative inline-flex items-center gap-2 rounded-lg border border-slate-200 px-2.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+        <button type="button" onClick={() => setDarkMode(mode => !mode)} aria-label={darkMode ? "Switch to light mode" : "Switch to dark mode"} aria-pressed={darkMode} title={darkMode ? "Light mode" : "Dark mode"} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-2.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+          <Icon name={darkMode ? "sun" : "moon"} className="h-4 w-4" />
+          <span className="hidden sm:inline">{darkMode ? "Light mode" : "Dark mode"}</span>
+        </button>
+        {isResident && <button type="button" onClick={() => navigate("inbox")} aria-label="Open my alerts" title="My alerts" className="relative inline-flex items-center gap-2 rounded-lg border border-slate-200 px-2.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">
           <Icon name="messages" className="h-4 w-4" />
-          <span>SMS inbox</span>
+          <span>My alerts</span>
           {unreadInboxCount > 0 && <span className="rounded-full bg-rose-600 px-1.5 py-0.5 text-[9px] font-bold text-white">{unreadInboxCount}</span>}
         </button>}
-        {isResident ? <button onClick={() => navigate("profile")} className="flex items-center gap-2 text-xs font-semibold text-slate-700">{actor.profileImage ? <img src={actor.profileImage} alt={copy("copy_e3b0c44298fc")} className="h-8 w-8 rounded-full object-cover" /> : <span className="avatar grid h-8 w-8 place-items-center rounded-full bg-rose-50 text-rose-700">{actor.name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase()}</span>}<span className="hidden sm:inline">{actor.name}</span></button> : <div className="flex items-center gap-2 text-xs font-semibold text-slate-700"><span className="avatar grid h-8 w-8 place-items-center rounded-full bg-rose-50 text-rose-700">{actor.name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase()}</span><span className="hidden sm:inline">{actor.name}</span></div>}
+        {isResident ? <button aria-label={`Open profile for ${actor.name}`} onClick={() => navigate("profile")} className="flex items-center gap-2 text-xs font-semibold text-slate-700">{actor.profileImage ? <img src={actor.profileImage} alt="" className="h-8 w-8 rounded-full object-cover" /> : <span aria-hidden="true" className="avatar grid h-8 w-8 place-items-center rounded-full bg-rose-50 text-rose-700">{actor.name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase()}</span>}<span className="hidden sm:inline">{actor.name}</span></button> : <div className="flex items-center gap-2 text-xs font-semibold text-slate-700"><span aria-hidden="true" className="avatar grid h-8 w-8 place-items-center rounded-full bg-rose-50 text-rose-700">{actor.name.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase()}</span><span className="hidden sm:inline">{actor.name}</span></div>}
       </div>
     </header>
     <div className="portal-layout mx-auto grid max-w-[1500px] gap-5 px-4 py-5 sm:px-7 lg:grid-cols-[225px_minmax(0,1fr)] lg:gap-6 lg:py-7">
-      <aside className={`portal-sidebar ${mobileMenu ? "fixed inset-y-16 left-0 z-10 block w-[280px] overflow-y-auto shadow-xl" : "hidden"} h-fit rounded-xl border border-slate-200 bg-white p-3 lg:sticky lg:top-20 lg:block`}>
+      <aside id="portal-navigation" className={`portal-sidebar ${mobileMenu ? "fixed inset-y-16 left-0 z-10 block w-[280px] overflow-y-auto shadow-xl" : "hidden"} h-fit rounded-xl border border-slate-200 bg-white p-3 lg:sticky lg:top-20 lg:block`}>
         <p className="px-3 pb-3 pt-2 text-[9px] font-extrabold tracking-[.14em] text-slate-400">{currentSettings.sidebarLabel}</p>
-        {nav.map(({ key, label, icon }) => <button key={key} onClick={() => navigate(key)} className={`mb-1 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-xs font-semibold ${page === key ? "active-nav bg-rose-50 text-rose-800" : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"}`}><Icon name={icon} className="h-4 w-4" />{label}{(key === "incidents" || (isResident && key === "advisories")) && activeAdvisories.length > 0 && <span className="nav-count ml-auto rounded-full bg-white px-2 py-0.5 text-[9px] text-rose-700">{activeAdvisories.length}</span>}{key === "inbox" && unreadInboxCount > 0 && <span className="nav-count ml-auto rounded-full bg-rose-600 px-2 py-0.5 text-[9px] text-white">{unreadInboxCount}</span>}</button>)}
+        <nav aria-label="Main menu">{nav.map(({ key, label, icon }) => <button key={key} aria-current={page === key ? "page" : undefined} onClick={() => navigate(key)} className={`mb-1 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-xs font-semibold ${page === key ? "active-nav bg-rose-50 text-rose-800" : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"}`}><Icon name={icon} className="h-4 w-4" />{label}{(key === "incidents" || (isResident && key === "advisories")) && activeAdvisories.length > 0 && <span className="nav-count ml-auto rounded-full bg-white px-2 py-0.5 text-[9px] text-rose-700">{activeAdvisories.length}</span>}{key === "inbox" && unreadInboxCount > 0 && <span className="nav-count ml-auto rounded-full bg-rose-600 px-2 py-0.5 text-[9px] text-white">{unreadInboxCount}</span>}</button>)}</nav>
         <div className="mt-4 rounded-lg bg-slate-50 p-3 text-[10px] leading-5 text-slate-500"><strong className="block text-[11px] text-slate-700">{copy("copy_dd5f522c6551")}</strong>{isResident ? copy("copy_e3659a65afce") : copy("copy_053e2c45051b")}</div>
         <button onClick={signOut} className="mt-3 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-xs font-semibold text-slate-500 hover:bg-slate-50"><Icon name="shield" className="h-4 w-4" />{copy("copy_48f0d3d397d4")}</button>
       </aside>
       <section className="min-w-0">
         <div className="portal-page-heading mb-5 flex flex-wrap items-end justify-between gap-3"><div><p className="mb-2 text-[9px] font-extrabold tracking-[.15em] text-[var(--brand)]">{currentSettings.pageHeadingLabel}</p><h1 className="mb-1 text-2xl font-extrabold tracking-tight text-slate-900 sm:text-3xl">{page === "overview" && isResident ? `${currentSettings.overviewGreetingPrefix} ${actor.name.split(" ")[0]}` : mainTitle}</h1><p className="m-0 text-xs text-slate-500">{pageDescription}</p></div>
-          <div className="flex items-center gap-2">{(page === "overview" || (page === "incidents" && portal !== "cepalco")) && !isResident && <button onClick={() => portal === "water" || portal === "cepalco" ? navigate("publish") : setModal("advisory")} className="inline-flex items-center gap-2 rounded-lg bg-[var(--brand)] px-3 py-2.5 text-xs font-bold text-white hover:bg-[var(--brand-dark)]"><Icon name="plus" className="h-4 w-4" />{newButton}</button>}{page === "overview" && !isResident && <button onClick={() => setModal("work")} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-xs font-bold text-slate-700"><Icon name="plus" className="h-4 w-4" />{copy("copy_311599f38345")}</button>}<span className="hidden rounded-full border border-slate-200 bg-white px-3 py-2 text-[10px] font-semibold text-slate-500 md:inline">{new Intl.DateTimeFormat("en-PH", { month: "short", day: "numeric", year: "numeric" }).format(new Date())}</span></div>
+          <div className="flex items-center gap-2">{!isResident && (page === "overview" || page === "incidents") && <button type="button" onClick={() => navigate("publish")} className="inline-flex items-center gap-2 rounded-lg bg-[var(--brand)] px-4 py-3 text-sm font-bold text-white hover:bg-[var(--brand-dark)]"><Icon name="plus" className="h-4 w-4" />{newButton}</button>}<span className="hidden rounded-full border border-slate-200 bg-white px-3 py-2 text-[10px] font-semibold text-slate-500 md:inline">{new Intl.DateTimeFormat("en-PH", { month: "short", day: "numeric", year: "numeric" }).format(new Date())}</span></div>
         </div>
-        {error && token && <div role="alert" className="mb-4 flex items-center justify-between rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800"><span>{error}</span><button onClick={() => setError(copy("copy_e3b0c44298fc"))} aria-label={copy("copy_2db046678b9c")}><Icon name="close" /></button></div>}
-        {publishedDelivery && <div role={publishedDelivery.summary.failed || publishedDelivery.summary.status === "no_recipients" ? "alert" : "status"} className={`mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3 text-sm ${publishedDelivery.summary.failed || publishedDelivery.summary.status === "no_recipients" ? "border-amber-200 bg-amber-50 text-amber-900" : "border-emerald-200 bg-emerald-50 text-emerald-900"}`}>
-          <span>{advisoryPublishMessage("", publishedDelivery.summary)}</span>
-          {publishedDelivery.summary.failed > 0 && <button type="button" onClick={() => void retryFailedEmails()} disabled={retryingEmail} className="rounded-md border border-current px-3 py-2 text-xs font-semibold disabled:opacity-60">{retryingEmail ? "Retrying…" : "Retry failed email(s)"}</button>}
+        {Object.keys(workspaceErrors).length > 0 && <div role="alert" aria-live="assertive" className="mb-4 flex flex-wrap items-start justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950 shadow-sm">
+          <div className="min-w-0 flex-1">
+            <p className="m-0 font-semibold">Some portal data could not be loaded. Counts and lists may be incomplete.</p>
+            <ul className="mb-0 mt-2 space-y-1 pl-5 text-xs">{Object.entries(workspaceErrors).map(([section, message]) => <li key={section}><strong className="capitalize">{section}:</strong> {message}</li>)}</ul>
+          </div>
+          <button type="button" onClick={() => void loadWorkspace()} disabled={loading} className="rounded-lg border border-amber-400 bg-white px-3 py-2 text-xs font-semibold text-amber-950 hover:bg-amber-100 disabled:opacity-60">{loading ? "Retrying…" : "Retry loading"}</button>
         </div>}
-        {publishedSocialDelivery && <div role={publishedSocialDelivery.summary.platforms.some(platform => platform.status !== "published" || !platform.permalinkUrl) ? "alert" : "status"} className="mb-4 rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-800">
-          <strong className="mb-2 block">Social publishing · {publishedSocialDelivery.summary.status}</strong>
-          <ul className="m-0 list-inside list-disc space-y-1">
-            {publishedSocialDelivery.summary.platforms.map(platform => <li key={platform.platform}>
-              {platform.platform}: {platform.status}
-              {platform.permalinkUrl && <> — <a href={platform.permalinkUrl} target="_blank" rel="noreferrer" className="font-semibold text-[var(--brand)] underline">Open exact post</a></>}
-              {platform.message && ` (${platform.message})`}
-              {platform.status === "published" && !platform.permalinkUrl && !platform.message && " (post link unavailable)"}
-            </li>)}
-          </ul>
+        {error && token && <div role="alert" aria-live="assertive" className="fixed left-1/2 top-20 z-50 flex w-[min(92vw,36rem)] -translate-x-1/2 items-start justify-between gap-4 rounded-xl border border-rose-300 bg-rose-50 px-5 py-4 text-sm font-semibold text-rose-900 shadow-2xl">
+          <span>{error}</span><button type="button" onClick={() => setError("")} aria-label="Dismiss notification" className="shrink-0 rounded p-1 hover:bg-black/5"><Icon name="close" className="h-4 w-4" /></button>
         </div>}
         {loading && <div className="mb-4 h-1 overflow-hidden rounded-full bg-slate-200"><div className="h-full w-1/3 animate-pulse bg-[var(--brand)]" /></div>}
-        {page === "overview" ? <Overview portal={portal} actor={actor} advisories={activeAdvisories} workOrders={items.workOrders} network={items.network} onNavigate={navigate} onAction={kind => kind === "advisory" && !isResident ? navigate("publish") : setModal(kind)} /> : isResident && page === "inbox" ? <VirtualInbox messages={inbox} onRead={async message => { await localAction(portal, `/inbox/${message.id}/read`, token, { method: "PATCH" }); await loadWorkspace(); }} /> : page === "profile" && isResident ? <ResidentProfile actor={actor} selectedImage={profileImage} saving={busy} onImageChange={setProfileImage} onSave={saveProfile} onPasswordChange={updatePassword} /> : page === "advisories" && isResident ? <ResidentAdvisories items={items.advisories} workOrders={items.workOrders} actor={actor} /> : (portal === "cepalco" || portal === "water") && page === "publish" ? portal === "water" ? <WaterPublishForm busy={busy} token={token} onCancel={() => navigate("overview")} onSubmit={publishAnnouncement} /> : <AnnouncementComposer portal={portal} busy={busy} token={token} onCancel={() => navigate("overview")} onSubmit={publishAnnouncement} /> : portal === "cepalco" && page === "incidents" ? <CepalcoDisruptions items={items.advisories} token={token} onStatusUpdate={updateAdvisoryStatus} /> : portal === "water" && page === "incidents" ? <WaterAdvisories items={items.advisories} token={token} onStatusUpdate={updateAdvisoryStatus} /> : portal === "cepalco" && page === "restoration" ? <CepalcoRestorationMap advisories={advisories} /> : page === "restoration" ? <Network portal={portal} advisories={advisories} network={items.network} /> : page === "services" ? <Services advisories={items.advisories} /> : <section className="space-y-4">
+        {page === "overview" ? <Overview portal={portal} actor={actor} advisories={activeAdvisories} workOrders={items.workOrders} network={items.network} errors={workspaceErrors} onNavigate={navigate} onAction={kind => kind === "advisory" && !isResident ? navigate("publish") : setModal(kind)} /> : page === "inbox" && isResident ? <VirtualInbox messages={inbox} unavailable={workspaceErrors.inbox} onRead={async message => { await localAction(portal, `/inbox/${message.id}/read`, token, { method: "PATCH" }); await loadWorkspace(); }} /> : page === "profile" && isResident ? <ResidentProfile actor={actor} selectedImage={profileImage} saving={busy} onImageChange={setProfileImage} onSave={saveProfile} onPasswordChange={updatePassword} /> : page === "advisories" && isResident ? <ResidentAdvisories items={items.advisories} workOrders={items.workOrders} actor={actor} errors={workspaceErrors} /> : page === "residents" && !isResident && portal === "water" ? <WaterReports reports={items.reports} onStatusUpdate={updateReportStatus} unavailable={workspaceErrors["resident reports"]} /> : page === "residents" && !isResident ? <CepalcoReports reports={items.reports} onStatusUpdate={updateReportStatus} unavailable={workspaceErrors["resident reports"]} /> : (portal === "water" || portal === "cepalco") && page === "publish" ? <WaterPublishForm portal={portal} busy={busy} token={token} onCancel={() => navigate(portal === "cepalco" ? "incidents" : "overview")} onSubmit={publishAnnouncement} /> : portal === "cepalco" && page === "incidents" ? <CepalcoDisruptions items={items.advisories} token={token} onInstagramRetry={publishInstagramForAdvisory} onStatusUpdate={updateAdvisoryStatus} loadError={workspaceErrors.advisories} /> : portal === "water" && page === "incidents" ? <WaterAdvisories items={items.advisories} token={token} onInstagramRetry={publishInstagramForAdvisory} onStatusUpdate={updateAdvisoryStatus} loadError={workspaceErrors.advisories} /> : page === "restoration" && portal === "water" ? <Network portal={portal} advisories={advisories} network={items.network} errors={workspaceErrors} /> : page === "services" ? <Services advisories={items.advisories} unavailable={workspaceErrors.advisories} /> : <section className="space-y-4">
           {page === "incidents" && <div className="flex flex-wrap items-center justify-between gap-3"><label className="flex min-w-[230px] flex-1 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-slate-400"><Icon name="search" className="h-4 w-4" /><input className="w-full border-0 bg-transparent text-xs text-slate-800 outline-none" placeholder={copy("copy_7145ac5f783f")} onChange={event => document.querySelectorAll<HTMLElement>("[data-search-item]").forEach(card => { card.hidden = !card.innerText.toLowerCase().includes(event.target.value.toLowerCase()); })} /></label>{!isResident && <button onClick={() => setModal("advisory")} className="rounded-lg bg-[var(--brand)] px-4 py-2.5 text-xs font-bold text-white">{copy("copy_dd425feef83c")}{newButton}</button>}</div>}
-          <div className="grid gap-3 xl:grid-cols-2">{sectionItems.map(item => <DataCard key={item.id} item={item} page={page} />)}{sectionItems.length === 0 && <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500">{copy("copy_9b2835326f52")}</div>}</div>
+          <div className="grid gap-3 xl:grid-cols-2">{sectionItems.map(item => <DataCard key={item.id} item={item} page={page} />)}{sectionItems.length === 0 && (page === "residents" && workspaceErrors["resident reports"] ? <SectionUnavailable title="Resident reports" message={workspaceErrors["resident reports"]} /> : <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-sm text-slate-500">{copy("copy_9b2835326f52")}</div>)}</div>
         </section>}
       </section>
     </div>
-    {toast && <div role={toast.startsWith("Announcement saved.") && /failed|not_configured|no eligible resident accounts|no resident profiles match|no text was sent|not sent/i.test(toast) ? "alert" : "status"} className={`fixed bottom-5 right-5 z-40 rounded-lg px-4 py-3 text-sm font-medium text-white shadow-xl ${toast.startsWith("Announcement saved.") && /failed|not_configured|no eligible resident accounts|no resident profiles match|no text was sent|not sent/i.test(toast) ? "bg-amber-800" : "bg-emerald-900"}`}>{toast}</div>}
+    {toast && <div role={toast.type === "error" ? "alert" : "status"} aria-live={toast.type === "error" ? "assertive" : "polite"} className={`portal-notification fixed right-4 top-20 z-[51] flex w-[min(92vw,27rem)] items-start gap-3 rounded-2xl border border-l-4 p-4 text-sm shadow-2xl sm:right-6 ${toast.type === "error" ? "border-rose-200 border-l-rose-500 bg-white text-slate-800" : "border-emerald-200 border-l-emerald-500 bg-white text-slate-800"}`}>
+      <span className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full ${toast.type === "error" ? "bg-rose-100 text-rose-700" : "bg-emerald-100 text-emerald-700"}`} aria-hidden="true">
+        <Icon name={toast.type === "error" ? "alert" : "shield"} className="h-4 w-4" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="m-0 font-bold text-slate-900">{toast.type === "error" ? "Needs your attention" : "Action completed"}</p>
+        <div className="mt-1 max-h-40 space-y-1 overflow-y-auto break-words text-xs leading-5 text-slate-600">
+          {toast.message.split("\n").map((line, index) => <p className="m-0" key={`${index}-${line}`}>{line.replace(/^\s*-\s*/, "")}</p>)}
+        </div>
+        {toast.links?.length ? <div className="mt-3 flex flex-wrap gap-2">
+          {toast.links.map(link => <a key={`${link.label}-${link.url}`} href={link.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-lg bg-[var(--brand-soft)] px-3 py-2 text-xs font-bold text-[var(--brand)] hover:underline">{link.label}<span aria-hidden="true">↗</span></a>)}
+        </div> : null}
+        {toast.retryInstagramAdvisoryId && <button type="button" disabled={retryingInstagramAdvisoryId === toast.retryInstagramAdvisoryId} onClick={() => void publishInstagramForAdvisory(toast.retryInstagramAdvisoryId!)} className="mt-3 rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60">{retryingInstagramAdvisoryId === toast.retryInstagramAdvisoryId ? "Retrying Instagram…" : "Retry Instagram"}</button>}
+        {publishedDelivery?.summary.failed ? <button type="button" onClick={() => void retryFailedEmails()} disabled={retryingEmail} className="mt-3 rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 disabled:opacity-60">{retryingEmail ? "Retrying…" : "Retry failed email(s)"}</button> : null}
+      </div>
+      <button type="button" onClick={() => setToast(null)} aria-label="Dismiss notification" className="shrink-0 rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><Icon name="close" className="h-4 w-4" /></button>
+    </div>}
+    {publishConfirmation && <div className="fixed inset-0 z-[60] grid place-items-center bg-slate-950/60 p-4" onKeyDown={event => {
+      if (event.key === "Escape") resolvePublishConfirmation(false);
+    }}>
+      <section role="dialog" aria-modal="true" aria-labelledby="publish-confirmation-title" className="w-full max-w-xl rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl sm:p-6">
+        <h2 id="publish-confirmation-title" className="m-0 text-lg font-bold text-slate-900">Confirm announcement</h2>
+        <pre className="my-4 max-h-[55vh] overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-slate-50 p-4 text-sm leading-6 text-slate-700">{publishConfirmation}</pre>
+        <div className="flex justify-end gap-3">
+          <button type="button" onClick={() => resolvePublishConfirmation(false)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">Cancel</button>
+          <button type="button" autoFocus onClick={() => resolvePublishConfirmation(true)} className="rounded-lg bg-[var(--brand)] px-4 py-2 text-sm font-semibold text-white hover:bg-[var(--brand-dark)]">Confirm &amp; publish</button>
+        </div>
+      </section>
+    </div>}
     {modal && <RecordModal portal={portal} kind={modal} onClose={() => setModal(null)} onSubmit={submitRecord} />}
   </main>;
 }
@@ -1197,7 +1636,7 @@ function ResidentProfile({ actor, selectedImage, saving, onImageChange, onSave, 
   return <div className="resident-profile-page space-y-4">
     <article className="resident-profile-card flex flex-wrap items-center gap-4 rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm">
       {image ? <img src={image} alt={`${actor.name} profile`} className="h-16 w-16 rounded-full border border-slate-200 object-cover shadow-sm" /> : <span className="avatar grid h-16 w-16 place-items-center rounded-full bg-rose-50 text-xl font-bold text-rose-700 shadow-sm">{actor.name.split(" ").map(part => part[0]).slice(0, 2).join("").toUpperCase()}</span>}
-      <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><strong className="text-base font-bold text-slate-900">{actor.name}</strong><span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-bold text-emerald-800">{copy("copy_39882d1ad5ec")}</span></div><p className="mb-0 mt-1 text-xs text-slate-500">{actor.barangay || "Barangay not set"}{actor.purok ? ` · Purok ${actor.purok}` : ""}{actor.district ? ` · ${actor.district}` : ""} {copy("copy_6e01f78b9eb4")}{actor.city || "Cagayan de Oro City"}</p><p className="mb-0 mt-1 text-xs text-slate-400">{copy("copy_cbbd7f35fdea")}{actor.email}</p></div>
+      <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><strong className="text-base font-bold text-slate-900">{actor.name}</strong><span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-bold text-emerald-800">{copy("copy_39882d1ad5ec")}</span></div><p className="mb-0 mt-1 text-xs text-slate-500">{actor.barangay || "Barangay not set"}{actor.purok ? ` · Purok ${actor.purok}` : ""}{actor.district ? ` · ${actor.district}` : ""} {copy("copy_6e01f78b9eb4")}{actor.city || "City not set"}</p><p className="mb-0 mt-1 text-xs text-slate-400">{copy("copy_cbbd7f35fdea")}{actor.email}</p></div>
       <div className="flex flex-wrap gap-2"><label className="cursor-pointer rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 shadow-sm transition-colors">{copy("copy_c5fbcb8b00ea")}<input type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" onChange={event => selectImage(event.currentTarget.files?.[0])} /></label>{image && <button type="button" onClick={() => { onImageChange(""); setImageError(""); }} className="rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 shadow-sm transition-colors">{copy("copy_c3812fc4acb8")}</button>}</div>
       {imageError && <p role="alert" className="w-full text-xs font-medium text-rose-700">{imageError}</p>}
     </article>
@@ -1209,23 +1648,21 @@ function ResidentProfile({ actor, selectedImage, saving, onImageChange, onSave, 
           <label className={labelClass}>{copy("copy_f603e86165b0")}<input name="name" required maxLength={120} defaultValue={actor.name} autoComplete="name" className={fieldClass} /></label>
           <label className={labelClass}>{copy("copy_09bf25ef3083")}<input name="email" type="email" required defaultValue={actor.email} autoComplete="email" className={fieldClass} /></label>
           <label className={labelClass}>{copy("copy_ba148fbc44de")}<input name="phoneNumber" type="tel" maxLength={40} defaultValue={actor.phoneNumber || ""} autoComplete="tel" className={fieldClass} /></label>
-          <label className={labelClass}>{copy("copy_e7cf3ef4f17c")}<input type="password" value={copy("copy_6becb7727529")} readOnly className={`${fieldClass} bg-slate-50`} /><span className="mt-1 block text-xs font-normal text-slate-400">{copy("copy_9b9e587044c6")}</span></label>
         </div>
       </article>
       <article className="resident-profile-card rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm">
         <div className="mb-4 flex items-center justify-between gap-2"><h2 className="m-0 text-base font-bold text-slate-900">{copy("copy_6f9f42ba937e")}</h2><span className="rounded-full bg-violet-50 px-2.5 py-0.5 text-xs font-bold text-violet-700">{copy("copy_8a59897bdc1a")}</span></div>
         <div className="grid gap-4 sm:grid-cols-2">
           <label className={`${labelClass} sm:col-span-2`}>{copy("copy_432d86cc06aa")}<input name="address" maxLength={240} defaultValue={actor.address || ""} autoComplete="street-address" className={fieldClass} /><span className="mt-1 block text-xs font-normal text-slate-500">Include your purok in this address if applicable; notices use it to refine area matching.</span></label>
-          <label className={labelClass}>{copy("copy_ad1315f3e999")}<select name="barangay" required defaultValue={actor.barangay || ""} autoComplete="address-level3" className={fieldClass}><option value="" disabled>Select your barangay</option>{requiredSetting(settingsFor("resident").barangays, "resident.barangays").map(name => <option key={name} value={name}>{name}</option>)}</select></label>
-          <label className={labelClass}>Purok (optional)<select name="purok" defaultValue={actor.purok || ""} className={fieldClass}><option value="">Not specified / no numbered purok</option>{ANNOUNCEMENT_PUROKS.map(number => <option key={number} value={number}>Purok {number}</option>)}</select><span className="mt-1 block text-xs font-normal text-slate-500">Choose your purok to receive announcements targeted to that area.</span></label>
+          <label className={labelClass}>{copy("copy_ad1315f3e999")}<ServiceAreaDropdown name="barangay" required defaultValue={actor.barangay || ""} autoComplete="address-level3" className={fieldClass} /></label>
+          <label className={labelClass}>Purok (optional)<PurokDropdown name="purok" defaultValue={actor.purok || ""} className={fieldClass} /><span className="mt-1 block text-xs font-normal text-slate-500">Your service location is kept in your profile; utility announcements are sent to all residents.</span></label>
           <label className={labelClass}>{copy("copy_ac3506fe618c")}<input name="postalCode" maxLength={20} defaultValue={actor.postalCode || ""} autoComplete="postal-code" className={fieldClass} /></label>
-          <label className={labelClass}>{copy("copy_c4473f4e49d0")}<input name="district" maxLength={80} defaultValue={actor.district || ""} className={fieldClass} /></label>
+          <label className={labelClass}>{copy("copy_c4473f4e49d0")}<DistrictDropdown name="district" defaultValue={actor.district || ""} className={fieldClass} /></label>
           <label className={labelClass}>{copy("copy_1f15f6d9f6b5")}<input name="city" maxLength={100} defaultValue={actor.city || ""} autoComplete="address-level2" className={fieldClass} /></label>
         </div>
       </article>
       <article className="resident-profile-card rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm">
         <div className="mb-4"><h2 className="m-0 text-base font-bold text-slate-900">{copy("copy_327f37078430")}</h2><p className="mb-0 mt-1 text-xs text-slate-500">{copy("copy_1b1d2a642be6")}</p></div>
-        <ProfilePreference name="smsAlerts" checked={actor.smsAlerts ?? true} title={copy("copy_ab3dd828aa41")} description={copy("copy_abe5bf56e7fd")} />
         <ProfilePreference name="maintenanceAlerts" checked={actor.maintenanceAlerts ?? true} title={copy("copy_c1d8fd5aca7b")} description={copy("copy_c59d87c00621")} />
         <ProfilePreference name="emailDigest" checked={actor.emailDigest ?? true} title={copy("copy_70c407729c22")} description={copy("copy_379b43036c4a")} />
         <p className="mb-0 mt-3 text-xs text-slate-500">{copy("mandatoryAdvisoryEmailInfo")}</p>
@@ -1235,16 +1672,16 @@ function ResidentProfile({ actor, selectedImage, saving, onImageChange, onSave, 
     </form>
 
     <article className="resident-profile-card rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
-      <h2 className="mb-1 mt-0 text-[11px] font-bold text-slate-900">{copy("copy_766b3efdf18a")}</h2>
+      <h2 className="mb-1 mt-0 text-base font-bold text-slate-900">{copy("copy_766b3efdf18a")}</h2>
       <div className="grid gap-4 md:grid-cols-2">
-        <form onSubmit={onPasswordChange} className="rounded-lg border border-slate-100 p-3">
-          <div className="mb-3 flex items-center justify-between"><strong className="text-[9px] text-slate-800">{copy("copy_4e70f1fd24ba")}</strong><span className="text-[8px] text-slate-400">{copy("copy_8e05740c775c")}</span></div>
-          <div className="grid gap-2 sm:grid-cols-3">
-            <input name="currentPassword" type="password" autoComplete="current-password" required placeholder={copy("copy_72ed2bd767ce")} className="min-w-0 rounded-md border border-slate-200 px-2 py-2 text-[8px]" />
-            <input name="newPassword" type="password" autoComplete="new-password" minLength={8} required placeholder={copy("copy_3dd9df4441fb")} className="min-w-0 rounded-md border border-slate-200 px-2 py-2 text-[8px]" />
-            <input name="confirmPassword" type="password" autoComplete="new-password" minLength={8} required placeholder={copy("copy_1b07cd5191be")} className="min-w-0 rounded-md border border-slate-200 px-2 py-2 text-[8px]" />
+        <form onSubmit={onPasswordChange} className="space-y-3 rounded-lg border border-slate-100 p-4">
+          <div className="mb-3"><strong className="block text-sm text-slate-800">{copy("copy_4e70f1fd24ba")}</strong><span className="mt-1 block text-xs text-slate-500">Choose a new password with at least 8 characters.</span></div>
+          <div className="grid gap-3">
+            <label className="block text-sm font-medium text-slate-700">Current password<PasswordInput name="currentPassword" autoComplete="current-password" required className={`${fieldClass} mt-1`} /></label>
+            <label className="block text-sm font-medium text-slate-700">New password<PasswordInput name="newPassword" autoComplete="new-password" minLength={8} required className={`${fieldClass} mt-1`} /></label>
+            <label className="block text-sm font-medium text-slate-700">Confirm new password<PasswordInput name="confirmPassword" autoComplete="new-password" minLength={8} required className={`${fieldClass} mt-1`} /></label>
           </div>
-          <button disabled={saving} className="mt-3 rounded-md border border-slate-200 px-3 py-2 text-[8px] font-semibold text-slate-700 disabled:opacity-60">{copy("copy_fe45b4014135")}</button>
+          <button disabled={saving} className="mt-1 rounded-lg border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 disabled:opacity-60">{copy("copy_fe45b4014135")}</button>
         </form>
         <div className="flex items-center justify-between gap-3 rounded-lg border border-slate-100 p-3"><span><strong className="block text-[9px] text-slate-800">{copy("copy_90c788511970")}</strong><small className="mt-1 block text-[8px] text-slate-500">{copy("copy_8600b2680c06")}</small></span><button type="button" disabled title={copy("copy_e215edc152ff")} className="rounded-md border border-slate-200 px-3 py-2 text-[8px] font-semibold text-slate-400">{copy("copy_67a926f7008e")}</button></div>
       </div>
@@ -1256,8 +1693,8 @@ function ResidentProfile({ actor, selectedImage, saving, onImageChange, onSave, 
 function ProfilePreference({ name, checked, title, description }: { name: string; checked: boolean; title: string; description: string }) {
   return <label className="resident-preference flex cursor-pointer items-center justify-between gap-4 border-b border-slate-100 py-3 last:border-0">
     <span><strong className="block text-[9px] text-slate-800">{title}</strong><small className="mt-1 block text-[8px] leading-4 text-slate-500">{description}</small></span>
-    <input type="checkbox" name={name} defaultChecked={checked} className="resident-preference-input sr-only" />
-    <span aria-hidden="true" className="resident-toggle shrink-0" />
+    <input type="checkbox" name={name} defaultChecked={checked} className="resident-preference-input peer sr-only" />
+    <span aria-hidden="true" className="resident-toggle shrink-0 peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[var(--brand)]" />
   </label>;
 }
 
@@ -1326,13 +1763,21 @@ function GmailConnection({ portal, token }: { portal: "cepalco" | "water"; token
 }
 
 function SocialConnectionStatus({ portal, token }: { portal: "cepalco" | "water"; token: string | null }) {
-  const [status, setStatus] = useState<{ facebook: boolean; instagram: boolean } | null>(null);
+  const [status, setStatus] = useState<{
+    facebook: boolean;
+    instagram: boolean;
+    instagramTokenSource: "instagram" | "facebook_page" | "missing";
+  } | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
     if (!token) return;
     let active = true;
-    void localAction<{ facebook: boolean; instagram: boolean }>(portal, "/social/status", token)
+    void localAction<{
+      facebook: boolean;
+      instagram: boolean;
+      instagramTokenSource: "instagram" | "facebook_page" | "missing";
+    }>(portal, "/social/status", token)
       .then(result => { if (active) setStatus(result); })
       .catch(err => { if (active) setError(err instanceof Error ? err.message : "Could not check social publishing setup."); });
     return () => { active = false; };
@@ -1343,167 +1788,77 @@ function SocialConnectionStatus({ portal, token }: { portal: "cepalco" | "water"
   return <p className="mb-0 text-xs text-slate-600">
     Facebook: <strong className={status.facebook ? "text-emerald-700" : "text-amber-700"}>{status.facebook ? "configured" : "server setup required"}</strong>
     {" · "}
-    Instagram: <strong className={status.instagram ? "text-emerald-700" : "text-amber-700"}>{status.instagram ? "configured" : "server setup required"}</strong>
-    {" · Meta checks token validity when publishing"}
+    Instagram: <strong className={status.instagram ? "text-emerald-700" : "text-amber-700"}>{status.instagram ? `configured (${status.instagramTokenSource === "instagram" ? "Instagram token" : "Facebook Page token"})` : "server setup required"}</strong>
+    {" · Meta validates the token at publish time; for decryption/validation errors, set a fresh "}
+    <code>{portal === "water" ? "META_INSTAGRAM_ACCESS_TOKEN" : "CEPALCO_META_INSTAGRAM_ACCESS_TOKEN"}</code>
+    {" in backend/.env and restart the API"}
   </p>;
 }
 
-function Overview({ portal, actor, advisories, workOrders, network, onNavigate, onAction }: { portal: Portal; actor: Actor; advisories: Advisory[]; workOrders: WorkOrder[]; network: NetworkReading[]; onNavigate: (page: string) => void; onAction: (modal: "advisory" | "work") => void }) {
+function SectionUnavailable({ title, message }: { title: string; message: string }) {
+  return <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-950">
+    <strong className="block">{title} are unavailable</strong>
+    <span className="mt-1 block text-xs leading-relaxed">{message}</span>
+  </div>;
+}
+
+function Overview({ portal, actor, advisories, workOrders, network, errors, onNavigate, onAction }: { portal: Portal; actor: Actor; advisories: Advisory[]; workOrders: WorkOrder[]; network: NetworkReading[]; errors: WorkspaceErrors; onNavigate: (page: string) => void; onAction: (modal: "advisory" | "work") => void }) {
   const water = portal === "water";
+  const cepalco = portal === "cepalco";
   const resident = portal === "resident";
-  if (resident) return <ResidentOverview actor={actor} advisories={advisories} onNavigate={onNavigate} />;
+  if (resident) return <ResidentOverview actor={actor} advisories={advisories} unavailable={errors.advisories} onNavigate={onNavigate} />;
   const averagePressure = network.length
     ? Math.round(network.reduce((sum, reading) => sum + reading.pressurePsi, 0) / network.length)
-    : 0;
+    : null;
   const activeAdvisoryCount = advisories.filter(item => !["Resolved", "Cancelled"].includes(item.status)).length;
-  const metrics = requiredSetting(settingsFor(portal).metrics, `${portal}.metrics`).map(metric => {
+  const configuredMetrics = requiredSetting(settingsFor(portal).metrics, `${portal}.metrics`);
+  const metrics = configuredMetrics
+    .filter(metric => !water || !["averagePressure", "scheduledMaintenance", "residentReports"].includes(metric.key))
+    .map(metric => {
     const value = metric.key === "activeAdvisories"
-      ? String(activeAdvisoryCount).padStart(2, "0")
+      ? errors.advisories ? "—" : String(activeAdvisoryCount).padStart(2, "0")
       : metric.key === "activeDisruptions"
-          ? String(activeAdvisoryCount).padStart(2, "0")
+          ? errors.advisories ? "—" : String(activeAdvisoryCount).padStart(2, "0")
       : metric.key === "averagePressure"
-          ? `${averagePressure} PSI`
+          ? errors["network readings"] || averagePressure === null ? "—" : `${averagePressure} PSI`
           : metric.key === "scheduledMaintenance"
-            ? String(workOrders.length).padStart(2, "0")
+            ? errors["work orders"] ? "—" : String(workOrders.length).padStart(2, "0")
             : metric.key === "scheduledWorks"
-              ? String(workOrders.length).padStart(2, "0")
-          : metric.value ?? "—";
+              ? errors["work orders"] ? "—" : String(workOrders.length).padStart(2, "0")
+          : "—";
     return { ...metric, value };
-  });
+    });
   return <div className={`space-y-4 admin-overview ${water ? "water-overview" : ""}`}>
     <section className="grid grid-cols-2 gap-3 xl:grid-cols-4">{metrics.map(metric => <article key={metric.key} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><div className="mb-4 grid h-9 w-9 place-items-center rounded-lg bg-[var(--brand-soft)] text-[var(--brand)]"><Icon name={metric.icon} /></div><strong className="block text-2xl font-extrabold tracking-tight text-slate-900">{metric.value}</strong><span className="mt-1 block text-[10px] text-slate-500">{metric.label}</span></article>)}</section>
-    <section className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_310px]">
+    <section className={`grid items-start gap-4 ${cepalco ? "" : "xl:grid-cols-[minmax(0,1fr)_310px]"}`}>
       <div className="space-y-4">
-        <article className="rounded-xl border border-slate-200 bg-white p-5"><div className="mb-4 flex items-center justify-between"><div><h2 className="m-0 text-base font-bold text-slate-900">{water ? copy("copy_76a36db7bf88") : "Active power advisories"}</h2><p className="mb-0 mt-1 text-[10px] text-slate-500">{copy("copy_10d5ea350e38")}</p></div><button onClick={() => onNavigate("incidents")} className="text-xs font-bold text-[var(--brand)]">{copy("copy_9a780508debb")}</button></div><div className="space-y-2">{advisories.slice(0, 3).map(item => <DataCard key={item.id} item={item} page="incidents" compact />)}{advisories.length === 0 && <Empty message={copy("copy_3678435c18e9")} />}</div></article>
-        <article className="rounded-xl border border-slate-200 bg-white p-5"><div className="mb-4 flex items-center justify-between"><div><h2 className="m-0 text-base font-bold text-slate-900">{water ? copy("copy_e9363430f378") : copy("copy_e036ecc020f2")}</h2><p className="mb-0 mt-1 text-[10px] text-slate-500">{copy("copy_90ceeef9cb18")}</p></div><button onClick={() => onAction("work")} className="text-xs font-bold text-[var(--brand)]">{copy("copy_311599f38345")}</button></div><WorkTable items={workOrders.slice(0, 3)} /></article>
-        {water ? <PressureZones readings={network} /> : <CepalcoOperationsSummary />}
+        <article className="rounded-xl border border-slate-200 bg-white p-5"><div className="mb-4 flex items-center justify-between"><div><h2 className="m-0 text-base font-bold text-slate-900">{water ? copy("copy_76a36db7bf88") : "Active power advisories"}</h2><p className="mb-0 mt-1 text-[10px] text-slate-500">{copy("copy_10d5ea350e38")}</p></div><button onClick={() => onNavigate("incidents")} className="text-xs font-bold text-[var(--brand)]">{copy("copy_9a780508debb")}</button></div><div className="space-y-2">{errors.advisories ? <SectionUnavailable title="Advisories" message={errors.advisories} /> : advisories.slice(0, 3).map(item => <DataCard key={item.id} item={item} page="incidents" compact />)}{!errors.advisories && advisories.length === 0 && <Empty message={copy("copy_3678435c18e9")} />}</div></article>
+        {water && <article className="rounded-xl border border-slate-200 bg-white p-5"><div className="mb-4 flex items-center justify-between"><div><h2 className="m-0 text-base font-bold text-slate-900">{copy("copy_e9363430f378")}</h2><p className="mb-0 mt-1 text-[10px] text-slate-500">{copy("copy_90ceeef9cb18")}</p></div><button onClick={() => onAction("work")} className="text-xs font-bold text-[var(--brand)]">{copy("copy_311599f38345")}</button></div>{errors["work orders"] ? <SectionUnavailable title="Work orders" message={errors["work orders"]} /> : <WorkTable items={workOrders.slice(0, 3)} />}</article>}
+        {water ? <PressureZones readings={network} unavailable={errors["network readings"]} /> : <CepalcoOperationsSummary advisories={advisories} unavailable={errors.advisories} />}
       </div>
-      <div className="space-y-4">
-        <article className="rounded-xl border border-slate-200 bg-white p-5"><div className="mb-4 flex items-center justify-between"><h2 className="m-0 text-sm font-bold text-slate-900">{water ? copy("copy_928d553c98de") : copy("copy_ed4be26c08f6")}</h2><span className="rounded-full bg-emerald-50 px-2 py-1 text-[9px] font-bold text-emerald-800">{copy("copy_9001b9c1ea3e")}</span></div><div className="space-y-3 text-xs"><HealthLine icon={water ? "drop" : "pulse"} label={water ? copy("copy_7a4d86e0b15e") : copy("copy_db2147de64b9")} value={copy("copy_996bf57d15be")} /><HealthLine icon="pulse" label={water ? copy("copy_0e7cd2979907") : copy("copy_4c82d70632f5")} value={water ? `${Math.round(network.reduce((sum, reading) => sum + reading.pressurePsi, 0) / Math.max(1, network.length))} PSI` : copy("copy_a5f0bab62ab7")} /><HealthLine icon="shield" label={water ? copy("copy_04a3d80a1962") : copy("copy_1b9c0ef8f022")} value={water ? copy("copy_d8ce14bfa8c0") : copy("copy_c4ff20ed5c92")} /></div>{water && <div className="mt-4 border-t border-slate-100 pt-4"><div className="mb-2 flex justify-between text-[10px] text-slate-500"><span>{copy("copy_0e2cc5230bce")}</span><strong className="text-slate-800">{network[0]?.reservoirPercent ?? "—"}{copy("copy_bbf3f11cb5b4")}</strong></div><div className="h-1.5 overflow-hidden rounded-full bg-slate-100"><span className="progress-fill block h-full rounded-full" style={{ width: `${network[0]?.reservoirPercent ?? 0}%` }} /></div><p className="mb-0 mt-2 text-[9px] text-slate-400">{copy("copy_f088839faf2b")}</p></div>}</article>
-        <article className="rounded-xl border border-slate-200 bg-white p-5"><div className="mb-3 flex items-center justify-between"><h2 className="m-0 text-sm font-bold text-slate-900">{water ? copy("copy_0183aa6e0b13") : "Power network map"}</h2><button onClick={() => onNavigate("restoration")} className="text-[10px] font-bold text-[var(--brand)]">{copy("copy_ea488d2693df")}</button></div><MiniMap portal={portal} /><div className="mt-3 flex gap-3 text-[9px] text-slate-500"><span>{copy("copy_a336ed94f116")}</span><span className="text-amber-700">{copy("copy_8ee132327af2")}</span></div></article>
-        <article className="rounded-xl border border-slate-200 bg-white p-5"><h2 className="mb-3 mt-0 text-sm font-bold text-slate-900">{copy("copy_1810407f5ab7")}</h2><div className="space-y-2">{!resident && <ActionButton icon="plus" label={water ? copy("copy_dd4c1e0f180b") : copy("copy_c48c20a1939c")} onClick={() => onNavigate("publish")} />}{!resident && <ActionButton icon="calendar" label={water ? copy("copy_264bf4916de8") : copy("copy_7edcd3387306")} onClick={() => onAction("work")} />}</div></article>
-        {water && <p className="rounded-lg bg-amber-50 p-3 text-[10px] leading-5 text-amber-900"><strong>{copy("copy_99499f2400eb")}</strong> {copy("copy_fa187e246369")}</p>}
-      </div>
+      {water && <div className="space-y-4">
+        <article className="rounded-xl border border-slate-200 bg-white p-5"><h2 className="mb-4 mt-0 text-sm font-bold text-slate-900">Current service data</h2><div className="space-y-3 text-xs"><HealthLine icon="alert" label="Active advisories" value={errors.advisories ? "Unavailable" : String(activeAdvisoryCount)} /><HealthLine icon={water ? "drop" : "pulse"} label="Network readings" value={errors["network readings"] ? "Unavailable" : network.length ? `${network.length} recorded` : "No readings"} />{water && <HealthLine icon="pulse" label="Average pressure" value={errors["network readings"] ? "Unavailable" : averagePressure === null ? "No readings" : `${averagePressure} PSI`} />}</div></article>
+        <article className="rounded-xl border border-slate-200 bg-white p-5"><div className="mb-3 flex items-center justify-between"><h2 className="m-0 text-sm font-bold text-slate-900">{copy("copy_0183aa6e0b13")}</h2><button onClick={() => onNavigate("restoration")} className="text-[10px] font-bold text-[var(--brand)]">{copy("copy_ea488d2693df")}</button></div><MiniMap portal={portal} advisories={advisories} unavailable={errors.advisories} /></article>
+        <article className="rounded-xl border border-slate-200 bg-white p-5"><h2 className="mb-3 mt-0 text-sm font-bold text-slate-900">{copy("copy_1810407f5ab7")}</h2><div className="space-y-2">{!resident && <ActionButton icon="plus" label={copy("copy_dd4c1e0f180b")} onClick={() => onNavigate("publish")} />}{!resident && <ActionButton icon="calendar" label={copy("copy_264bf4916de8")} onClick={() => onAction("work")} />}</div></article>
+      </div>}
     </section>
   </div>;
 }
 
-function CepalcoIncidentCard({ item, compact = false, onStatusUpdate }: { item: Advisory; compact?: boolean; onStatusUpdate?: (item: Advisory) => void }) {
-  return <StandardAnnouncementCard portal="cepalco" item={item} compact={compact} onStatusUpdate={onStatusUpdate} />;
+function CepalcoIncidentCard({ item, compact = false, token, onInstagramRetry, onStatusUpdate }: { item: Advisory; compact?: boolean; token?: string | null; onInstagramRetry?: (item: Advisory) => Promise<void>; onStatusUpdate?: (item: Advisory) => void }) {
+  return <StandardAnnouncementCard portal="cepalco" item={item} compact={compact} token={token} onInstagramRetry={onInstagramRetry} onStatusUpdate={onStatusUpdate} />;
 }
 
-function CepalcoDisruptions({ items, onStatusUpdate, token }: { items: Advisory[]; onStatusUpdate: (item: Advisory) => void; token: string | null }) {
+function CepalcoDisruptions({ items, onStatusUpdate, onInstagramRetry, token, loadError }: { items: Advisory[]; onStatusUpdate: (item: Advisory) => void; onInstagramRetry: (item: Advisory) => Promise<void>; token: string | null; loadError?: string }) {
   const [query, setQuery] = useState("");
   const incidentStatuses = requiredSetting(settingsFor("cepalco").filters?.incidentStatuses, "cepalco.filters.incidentStatuses");
   const [statusFilter, setStatusFilter] = useState(incidentStatuses[0]);
   const filtered = items.filter(item => `${item.title} ${item.area} ${item.reference} ${item.details}`.toLowerCase().includes(query.toLowerCase()) && (statusFilter === "All" || item.status === statusFilter));
   return <section className="cepalco-page-stack admin-page-stack">
     <div className="cepalco-toolbar"><label className="cepalco-search"><Icon name="search" className="h-4 w-4" /><span className="sr-only">Search power advisories</span><input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder={copy("copy_7145ac5f783f")} /></label><select value={statusFilter} onChange={event => setStatusFilter(event.target.value)} aria-label={copy("copy_d96d73ecc01f")}>{incidentStatuses.map(status => <option key={status}>{status}</option>)}</select></div>
-    <div className="cepalco-incident-grid">{filtered.map(item => <CepalcoIncidentCard key={item.id} item={item} onStatusUpdate={onStatusUpdate} />)}{!filtered.length && <Empty message={copy("copy_e5e64ce05143")} />}</div>
+    <div className="cepalco-incident-grid">{filtered.map(item => <CepalcoIncidentCard key={item.id} item={item} token={token} onInstagramRetry={onInstagramRetry} onStatusUpdate={onStatusUpdate} />)}{!filtered.length && (loadError ? <SectionUnavailable title="Advisories" message={loadError} /> : <Empty message={copy("copy_e5e64ce05143")} />)}</div>
     <ActivityLog portal="cepalco" token={token} />
   </section>;
-}
-
-function AnnouncementComposer(props: {
-  portal: "cepalco" | "water";
-  busy: boolean;
-  token: string | null;
-  onCancel: () => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-}) {
-  if (props.portal === "cepalco") {
-    return <CepalcoPublishForm busy={props.busy} token={props.token} onCancel={props.onCancel} onSubmit={props.onSubmit} />;
-  }
-  return <GenericAnnouncementComposer {...props} />;
-}
-
-function GenericAnnouncementComposer({
-  portal,
-  busy,
-  token,
-  onCancel,
-  onSubmit,
-}: {
-  portal: "cepalco" | "water";
-  busy: boolean;
-  token: string | null;
-  onCancel: () => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-}) {
-  const categories = requiredSetting(settingsFor(portal).categories, `${portal}.categories`);
-  const [selectedLocation, setSelectedLocation] = useState<CommunityAlertMapLocation | null>(null);
-  const [schedule, setSchedule] = useState(false);
-  const utilityLabel = portal === "cepalco" ? "CEPALCO" : "Water District";
-  const fieldClass = "mt-1 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm font-normal text-slate-800";
-  const labelClass = "block text-xs font-bold text-slate-700";
-  return <form onSubmit={onSubmit} className="space-y-4">
-    <section className="rounded-xl border border-slate-200 bg-white p-5">
-      <p className="mb-1 text-[9px] font-extrabold tracking-[.15em] text-[var(--brand)]">{utilityLabel} · ANNOUNCEMENT</p>
-      <h2 className="mb-1 mt-0 text-lg font-bold text-slate-900">Create an announcement</h2>
-      <p className="mb-0 text-xs text-slate-500">Add the report information and location, choose where to announce it, then publish now or schedule it.</p>
-    </section>
-    <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-5">
-      <h3 className="m-0 text-sm font-bold text-slate-900">Announcement details</h3>
-      <label className={labelClass}>Report category
-        <select name="category" required className={fieldClass} defaultValue={categories[0]?.value}>
-          {categories.map(category => <option key={category.value} value={category.value}>{category.value}</option>)}
-        </select>
-      </label>
-      <label className={labelClass}>Title
-        <input name="title" required maxLength={160} className={fieldClass} placeholder="Short, clear announcement title" />
-      </label>
-      <label className={labelClass}>Affected location
-        <input name="area" required maxLength={160} className={fieldClass} placeholder="Barangay, street, zone, or service area" />
-      </label>
-      <label className={labelClass}>Report details
-        <textarea name="details" required rows={5} maxLength={1800} className={fieldClass} placeholder="Describe what happened, who is affected, and any important instructions." />
-      </label>
-      <div>
-        <p className="mb-2 text-xs font-bold text-slate-700">Pin the affected location (optional)</p>
-        <input type="hidden" name="latitude" value={selectedLocation?.latitude ?? ""} />
-        <input type="hidden" name="longitude" value={selectedLocation?.longitude ?? ""} />
-        <GoogleMap mode="picker" height={270} label="Click the map to select a location" onLocationSelected={setSelectedLocation} />
-        <p className="mb-0 mt-2 text-xs text-slate-500">{selectedLocation
-          ? `Map pin: ${selectedLocation.latitude.toFixed(6)}, ${selectedLocation.longitude.toFixed(6)}`
-          : "Select a point on the map to include coordinates with this announcement."}</p>
-      </div>
-      <label className={labelClass}>Announcement image (optional)
-        <input type="file" name="announcementImage" accept="image/jpeg,image/png,image/webp" className={`${fieldClass} text-xs`} />
-        <span className="mt-1 block text-[10px] font-normal text-slate-500">JPEG, PNG, or WebP, up to 1 MB. Required for Instagram.</span>
-      </label>
-    </section>
-    <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-5">
-      <h3 className="m-0 text-sm font-bold text-slate-900">Announcement channels</h3>
-      <p className="m-0 text-xs text-slate-500">Select the channels you want to use. Choose at least one.</p>
-      <div className="grid gap-2 sm:grid-cols-2">
-        {([
-          ["facebook", "Facebook", "Post every announcement to the utility Facebook page."],
-          ["instagram", "Instagram", "Publish an image and caption to Instagram."],
-          ["gmail", "Gmail", "Email every registered resident with the announcement image."],
-          ["sms", "SMS (simulated)", "Add a simulated alert to opted-in residents' inboxes; no text message is sent."],
-        ] as const).map(([value, title, description]) => <label key={value} className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-3 text-xs">
-          <input type="checkbox" name="channels" value={value} defaultChecked={DEFAULT_ANNOUNCEMENT_CHANNELS.includes(value)} className="mt-0.5 accent-[var(--brand)]" />
-          <span><strong className="block text-slate-800">{title}</strong><small className="mt-1 block text-slate-500">{description}</small></span>
-        </label>)}
-      </div>
-      <GmailConnection portal={portal} token={token} />
-    </section>
-    <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-5">
-      <h3 className="m-0 text-sm font-bold text-slate-900">Publishing time</h3>
-      <label className="flex items-center gap-2 text-xs font-semibold text-slate-700">
-        <input type="checkbox" checked={schedule} onChange={event => setSchedule(event.target.checked)} />
-        Schedule this announcement for later
-      </label>
-      {schedule && <label className={labelClass}>Publish at
-        <input name="scheduledAt" type="datetime-local" required min={minimumLocalDateTime()} className={fieldClass} />
-      </label>}
-      {!schedule && <input type="hidden" name="scheduledAt" value="" />}
-    </section>
-    <div className="flex flex-wrap justify-end gap-2">
-      <button type="button" onClick={onCancel} className="rounded-lg border border-slate-200 px-4 py-2.5 text-xs font-bold text-slate-600">Cancel</button>
-      <button type="submit" disabled={busy} className="rounded-lg bg-[var(--brand)] px-4 py-2.5 text-xs font-bold text-white disabled:opacity-60">{busy ? "Saving…" : schedule ? "Schedule announcement" : "Publish announcement"}</button>
-    </div>
-  </form>;
 }
 
 function minimumLocalDateTime(): string {
@@ -1511,187 +1866,27 @@ function minimumLocalDateTime(): string {
   return date.toISOString().slice(0, 16);
 }
 
-function AnnouncementAreaPurokSelect({ portal, onChange }: { portal: "cepalco" | "water"; onChange: (area: string) => void }) {
-  const barangays = requiredSetting(settingsFor("resident").barangays, "resident.barangays");
-  const savedArea = readPortalDraftValue(portal, "area");
-  const savedMatch = savedArea.match(/^\s*(Carmen|Nazareth|Balulang)(?:\s*,\s*Purok\s+(\d+))?\s*$/i);
-  const savedBarangay = barangays.find(barangay => barangay.toLowerCase() === savedMatch?.[1]?.toLowerCase()) ?? "";
-  const savedPurok = savedMatch?.[2] && ANNOUNCEMENT_PUROKS.includes(savedMatch[2]) ? savedMatch[2] : "";
-  const [barangay, setBarangay] = useState(savedBarangay);
-  const [purok, setPurok] = useState(savedPurok);
-  const area = `${barangay}${purok ? `, Purok ${purok}` : ""}`;
-
-  return <>
-    <label className="cepalco-field"><span>Affected barangay</span><select aria-label="Affected barangay" value={barangay} required onChange={event => { const nextBarangay = event.target.value; setBarangay(nextBarangay); onChange(`${nextBarangay}${purok ? `, Purok ${purok}` : ""}`); }}><option value="" disabled>Select a barangay</option>{barangays.map(name => <option key={name} value={name}>{name}</option>)}</select></label>
-    <label className="cepalco-field"><span>Purok (optional)</span><select aria-label="Affected purok" value={purok} onChange={event => { const nextPurok = event.target.value; setPurok(nextPurok); onChange(`${barangay}${nextPurok ? `, Purok ${nextPurok}` : ""}`); }}><option value="">All puroks</option>{ANNOUNCEMENT_PUROKS.map(number => <option key={number} value={number}>Purok {number}</option>)}</select><small>Choose All puroks to notify residents throughout the barangay.</small></label>
-    <input type="hidden" name="area" value={area} />
-  </>;
-}
-
-function CepalcoPublishForm({ busy, token, onCancel, onSubmit }: { busy: boolean; token: string | null; onCancel: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
-  const categories = requiredSetting(settingsFor("cepalco").categories, "cepalco.categories");
-  const priorities = requiredSetting(settingsFor("cepalco").priorities, "cepalco.priorities");
-  const [category, setCategory] = useState(() => readPortalDraftValue("cepalco", "category") || categories[0]?.value || "");
-  const [selectedArea, setSelectedArea] = useState(() => readPortalDraftValue("cepalco", "area"));
-  const [selectedLocation, setSelectedLocation] = useState<CommunityAlertMapLocation | null>(null);
-  const [channels, setChannels] = useState<string[]>(() => readPortalDraftChannels("cepalco"));
-  const [schedule, setSchedule] = useState(() => readPortalDraftValue("cepalco", "schedule") === "true");
-  const [draftSaved, setDraftSaved] = useState(false);
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [detailsLength, setDetailsLength] = useState(() => readPortalDraftValue("cepalco", "details").length);
-  useEffect(() => {
-    if (!imagePreview) return;
-    return () => URL.revokeObjectURL(imagePreview);
-  }, [imagePreview]);
-  function saveDraft(form: HTMLFormElement | null) {
-    if (!form) return;
-    new FormData(form).forEach((value, name) => {
-      if (value instanceof File || name === "channels") return;
-      localStorage.setItem(`civicalert:cepalco:draft:${name}`, String(value));
-    });
-    localStorage.setItem("civicalert:cepalco:draft:category", category);
-    localStorage.setItem("civicalert:cepalco:draft:schedule", String(schedule));
-    localStorage.setItem("civicalert:cepalco:draft:channels", channels.join("|"));
-    setDraftSaved(true);
-  }
-  function toggleChannel(channel: string) {
-    setChannels(current => current.includes(channel)
-      ? current.filter(value => value !== channel)
-      : [...current, channel]);
-    setDraftSaved(false);
-  }
-  return <form className="cepalco-publish-layout water-publish-form" onSubmit={onSubmit}>
-      <div className="water-publish-top cepalco-publish-top"><div><span>CEPALCO OPERATIONS / PUBLIC NOTICES</span><h2>Publish service advisory</h2></div><div><button type="button" onClick={onCancel}>Cancel</button><button type="button" onClick={event => saveDraft(event.currentTarget.form)}>Save draft</button><button type="submit" className="cepalco-primary" disabled={busy}>{busy ? "Publishing…" : schedule ? "Schedule advisory" : "Publish advisory"}</button></div></div>
-      <section className="cepalco-form-card">
-        <h2>Classify the service update</h2>
-        <p>Choose the advisory type and response priority for this notice.</p>
-        <div className="cepalco-category-grid">{categories.map(({ value, description, icon }) => <button key={value} type="button" aria-pressed={category === value} onClick={() => { setCategory(value); setDraftSaved(false); }} className={`cepalco-category ${category === value ? "selected" : ""}`}><span>{icon}</span><strong>{value}</strong><small>{description}</small></button>)}</div>
-        <input type="hidden" name="category" value={category} />
-        <label className="cepalco-field"><span>Priority / severity</span><select name="priority" defaultValue={readPortalDraftValue("cepalco", "priority") || "High"} onChange={() => setDraftSaved(false)}>{priorities.map(priority => <option key={priority}>{priority}</option>)}</select></label>
-      </section>
-      <section className="cepalco-form-card">
-        <h2>Advisory headline and affected area</h2>
-        <p>Identify the issue and the neighborhoods or zones that may be affected.</p>
-        <label className="cepalco-field"><span>Advisory headline</span><input name="title" required maxLength={160} defaultValue={readPortalDraftValue("cepalco", "title")} placeholder="Summarize the service update" onChange={() => setDraftSaved(false)} /></label>
-        <AnnouncementAreaPurokSelect portal="cepalco" onChange={area => { setSelectedArea(area); setSelectedLocation(null); setDraftSaved(false); }} />
-      </section>
-      <section className="cepalco-form-card">
-        <h2>Service window</h2>
-        <p>Add the expected start and restoration time when known.</p>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <label className="cepalco-field"><span>Advisory start</span><input name="serviceStartsAt" type="datetime-local" defaultValue={readPortalDraftValue("cepalco", "serviceStartsAt")} onChange={() => setDraftSaved(false)} /></label>
-          <label className="cepalco-field"><span>Estimated restoration</span><input name="estimatedRestorationAt" type="datetime-local" defaultValue={readPortalDraftValue("cepalco", "estimatedRestorationAt")} onChange={() => setDraftSaved(false)} /></label>
-        </div>
-      </section>
-      <section className="cepalco-form-card">
-        <div className="mb-2 flex items-center justify-between gap-2"><div>        <h2>Public notice and guidance</h2><p className="mb-0">Describe the impact and any steps residents should take.</p></div><small className="text-xs font-semibold text-slate-500">{detailsLength} / 1800</small></div>
-        <label className="cepalco-field"><span>Advisory details</span><textarea name="details" required rows={6} maxLength={1800} defaultValue={readPortalDraftValue("cepalco", "details")} placeholder="Explain what happened, who is affected, and any safety guidance." onChange={event => { setDetailsLength(event.target.value.length); setDraftSaved(false); }} /></label>
-      </section>
-      <section className="cepalco-form-card">
-        <h2>Affected location</h2>
-        <p>Optionally add a point on the map for residents to locate the advisory.</p>
-        <input type="hidden" name="latitude" value={selectedLocation?.latitude ?? ""} />
-        <input type="hidden" name="longitude" value={selectedLocation?.longitude ?? ""} />
-        <GoogleMap mode="picker" height={250} label="Select affected service location" selectedArea={selectedArea} onLocationSelected={setSelectedLocation} />
-        <p className="mb-0 mt-2 text-xs font-medium text-slate-600">{selectedLocation ? `Selected point: ${selectedLocation.latitude.toFixed(5)}, ${selectedLocation.longitude.toFixed(5)}. Click elsewhere on the map to adjust it.` : "Choose an affected area above to place a pin automatically, or click the map to place one manually."}</p>
-      </section>
-      <section className="cepalco-form-card">
-        <h2>Notice image</h2>
-        <p>Add an image to include it with selected Facebook, Instagram, and Gmail delivery. Instagram always requires an image.</p>
-        <label className="cepalco-field"><span>Image file</span><input type="file" name="announcementImage" accept="image/jpeg,image/png,image/webp" onChange={event => { const file = event.target.files?.[0]; setImagePreview(file ? URL.createObjectURL(file) : null); setDraftSaved(false); }} /><small>JPEG, PNG, or WebP, up to 15 MB. Automatically converted and optimized for Instagram.</small></label>
-        {imagePreview && <img src={imagePreview} alt="Selected advisory image preview" className="cepalco-announcement-preview" />}
-      </section>
-      <section className="cepalco-form-card">
-        <h2>Announcement channels</h2>
-        <p>Select the channels you want to use. Choose at least one.</p>
-        {([
-          ["gmail", "Email residents", "Email every registered resident with the announcement image."],
-          ["facebook", "Facebook", "Publish the announcement to the connected CEPALCO page."],
-          ["instagram", "Instagram", "Publish an image and caption to the connected account."],
-          ["sms", "Resident inbox alert", "Create simulated inbox alerts; no text messages are sent."],
-        ] as const).map(([value, title, description]) => <label className="cepalco-channel" key={value}>
-          <input type="checkbox" name="channels" value={value} checked={channels.includes(value)} onChange={() => toggleChannel(value)} />
-          <span><strong>{title}</strong><small>{description}</small></span>
-        </label>)}
-        <SocialConnectionStatus portal="cepalco" token={token} />
-        <GmailConnection portal="cepalco" token={token} />
-      </section>
-      <section className="cepalco-form-card">
-        <h2>Publishing time</h2>
-        <label className="cepalco-channel"><input type="checkbox" checked={schedule} onChange={event => { setSchedule(event.target.checked); setDraftSaved(false); }} /><span><strong>Schedule this advisory</strong><small>Leave unchecked to publish as soon as you submit.</small></span></label>
-        {schedule && <label className="cepalco-field">Publish date and time<input name="scheduledAt" type="datetime-local" required min={minimumLocalDateTime()} defaultValue={readPortalDraftValue("cepalco", "scheduledAt")} onChange={() => setDraftSaved(false)} /></label>}
-        {!schedule && <input type="hidden" name="scheduledAt" value="" />}
-      </section>
-      <div className="water-publish-footer cepalco-publish-footer">{draftSaved && <span className="water-draft-saved" role="status">Draft saved in this browser.</span>}<button type="button" onClick={onCancel}>Cancel</button><button type="button" onClick={event => saveDraft(event.currentTarget.form)}>Save draft</button><button type="submit" className="cepalco-primary" disabled={busy}>{busy ? "Publishing…" : schedule ? "Schedule advisory" : "Publish advisory"}</button></div>
-  </form>;
-}
-
-function readPortalDraftValue(portal: "cepalco" | "water", name: string) {
-  return localStorage.getItem(`civicalert:${portal}:draft:${name}`) || "";
-}
-
-function readPortalDraftChannels(portal: "cepalco" | "water"): string[] {
-  const savedChannels = localStorage.getItem(`civicalert:${portal}:draft:channels`);
-  if (savedChannels === null) return [...DEFAULT_ANNOUNCEMENT_CHANNELS];
-  return savedChannels.split("|")
-    .filter(channel => ["gmail", "facebook", "instagram", "sms"].includes(channel));
-}
-
-function CepalcoMiniMap() {
-  const markers = requiredSetting(settingsFor("cepalco").maps?.mini, "cepalco.maps.mini");
-  return <div className="cepalco-mini-map"><span className="mini-map-title">{copy("copy_30b0e513dacf")}</span>{markers.map(marker => <span key={marker.kind} className={`mini-map-pin pin-${marker.kind}`} style={{ left: `${marker.left}%`, top: `${marker.top}%` }} />)}</div>;
-}
-
-function CepalcoRestorationMap({ advisories }: { advisories: Advisory[] }) {
-  const active = advisories.filter(item => !["Resolved", "Cancelled"].includes(item.status));
-  const settings = settingsFor("cepalco");
-  const metrics = requiredSetting(settings.mapMetrics, "cepalco.mapMetrics");
-  const minimumFieldCrews = Number(requiredSetting(settings.dashboard?.minimumFieldCrews, "cepalco.dashboard.minimumFieldCrews"));
-  return <div className="cepalco-page-stack admin-page-stack">
-    <section className="cepalco-map-metrics grid grid-cols-2 gap-2 xl:grid-cols-4">{metrics.map(metric => <MapMetric key={metric.key} label={metric.label} value={metric.key === "activeOutage" ? String(active.length) : metric.key === "crewsInField" ? String(Math.max(active.length, minimumFieldCrews)) : metric.value || ""} detail={metric.key === "activeOutage" ? active[0]?.area || metric.detail : metric.detail} icon={metric.icon} />)}</section>
-    <article className="cepalco-form-card"><div className="mb-3 flex items-center justify-between"><div><h2>{copy("copy_10811357280f")}</h2><p>{copy("copy_447c01316fb5")}</p></div><span className="cepalco-pill good">{copy("copy_b373fc245b9f")}</span></div><CepalcoLargeMap advisories={active} /><div className="mt-3 flex flex-wrap gap-4 text-[9px] text-slate-600"><span>{copy("copy_bbf0b0b5e5df")}</span><span className="text-amber-700">{copy("copy_8ee132327af2")}</span><span className="text-teal-800">{copy("copy_f30c5b09f4f0")}</span></div></article>
-    <section><div className="mb-2 flex items-center justify-between"><div><h2 className="m-0 text-sm font-bold text-slate-900">{copy("copy_bdbeadd93387")}</h2><p className="mb-0 mt-1 text-[9px] text-slate-500">{copy("copy_bee37faf7a58")}</p></div></div><div className="space-y-2">{active.slice(0, 3).map(item => <CepalcoIncidentCard key={item.id} item={item} compact />)}{!active.length && <Empty message={copy("copy_375022a22378")} />}</div></section>
-  </div>;
-}
-
-function CepalcoLargeMap({ advisories }: { advisories: Advisory[] }) {
-  // UPDATED: Replaced mock SVG lines and simulated pins with saved Google Maps locations.
-  return <GoogleMap mode="display" announcements={mapAnnouncements(advisories)} height={360} label="Active utility advisory locations" />;
-}
-
-function MapMetric({ label, value, detail, icon }: { label: string; value: string; detail: string; icon: string }) {
-  return <article className="cepalco-map-metric"><span className="cepalco-metric-icon"><Icon name={icon} className="h-4 w-4" /></span><small>{label}</small><strong>{value}</strong><span>{detail}</span></article>;
-}
-
-function ResidentOverview({ actor, advisories, onNavigate }: { actor: Actor; advisories: Advisory[]; onNavigate: (page: string) => void }) {
+function ResidentOverview({ actor, advisories, unavailable, onNavigate }: { actor: Actor; advisories: Advisory[]; unavailable?: string; onNavigate: (page: string) => void }) {
   const activeCount = advisories.filter(item => !["Resolved", "Cancelled"].includes(item.status)).length;
-  const dashboard = requiredSetting(settingsFor("resident").dashboard, "resident.dashboard");
-  const metrics = requiredSetting(settingsFor("resident").metrics, "resident.metrics").map(metric => ({
-    ...metric,
-    value: metric.key === "activeAdvisories"
-      ? String(activeCount).padStart(2, "0")
-      : metric.key === "connectedServices"
-        ? String(requiredSetting(dashboard.connectedServices, "resident.dashboard.connectedServices"))
-        : metric.value,
-  }));
+  const metrics = requiredSetting(settingsFor("resident").metrics, "resident.metrics");
   return <div className="resident-workspace space-y-6">
     <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-      {metrics.map(metric => <article key={metric.key} className="resident-metric-card rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-start justify-between"><span className="grid h-10 w-10 place-items-center rounded-xl bg-[var(--brand-soft)] text-[var(--brand)]"><Icon name={metric.icon} /></span>{metric.badge && (metric.key !== "activeAdvisories" || activeCount > 0) && <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${metric.key === "activeAdvisories" ? "border-rose-200 bg-rose-50 font-bold text-rose-700" : metric.key === "updateFrequency" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 text-slate-500"}`}>{metric.badge}</span>}</div><strong className="mt-4 block text-3xl font-extrabold tracking-tight text-slate-900">{metric.value}</strong><span className="mt-1 block text-xs font-medium text-slate-500">{metric.label}</span></article>)}
+      {metrics.map(metric => <article key={metric.key} className="resident-metric-card rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-start justify-between"><span className="grid h-10 w-10 place-items-center rounded-xl bg-[var(--brand-soft)] text-[var(--brand)]"><Icon name={metric.icon} /></span>{!unavailable && activeCount > 0 && <span className="rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-bold text-rose-700">Attention required</span>}</div><strong className="mt-4 block text-3xl font-extrabold tracking-tight text-slate-900">{unavailable ? "—" : String(activeCount).padStart(2, "0")}</strong><span className="mt-1 block text-xs font-medium text-slate-500">{metric.label}</span></article>)}
     </section>
     <section className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
       <article className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm">
         <div className="mb-5 flex items-center justify-between gap-3"><div><h2 className="m-0 text-base font-bold text-slate-900">{copy("copy_90815a5d5f32")}</h2><p className="mb-0 mt-1 text-xs text-slate-500">{copy("copy_e71ce3f31ff3")}</p></div><button onClick={() => onNavigate("advisories")} className="text-xs font-bold text-[var(--brand)] hover:underline">{copy("copy_63dff5d5a6f2")}</button></div>
-        <div className="space-y-4">{advisories.slice(0, 3).map(item => <ResidentAdvisoryCard key={item.id} item={item} compact />)}{advisories.length === 0 && <Empty message={copy("copy_a97e0906b67f")} />}</div>
+        <div className="space-y-4">{unavailable ? <SectionUnavailable title="Advisories" message={unavailable} /> : advisories.slice(0, 3).map(item => <ResidentAdvisoryCard key={item.id} item={item} compact />)}{!unavailable && advisories.length === 0 && <Empty message={copy("copy_a97e0906b67f")} />}</div>
       </article>
       <div className="space-y-5">
-        <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="mb-3 flex items-center justify-between"><h2 className="m-0 text-sm font-bold text-slate-900">{copy("copy_4861614144e2")}</h2><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-800">{copy("copy_b5917cae2e50")}</span></div><ResidentCommunityMap /><div className="mt-3 flex gap-2 text-xs text-slate-500"><span>{copy("copy_a6264e51595e")}</span><span className="font-semibold text-amber-700">{copy("copy_1625df60e00b")}</span></div><p className="mb-0 mt-2 text-xs text-slate-500">{copy("copy_ad386e3eb489")}{actor.barangay || "your registered service area"}{copy("copy_cdb4ee2aea69")}</p></article>
-        <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="mb-4 mt-0 text-sm font-bold text-slate-900">{copy("copy_7ad5d50411ba")}</h2><div className="space-y-3"><HealthLine icon="pulse" label={copy("copy_43889238bb6e")} value={advisories.some(item => item.utility === "CEPALCO" && item.status !== "Resolved") ? copy("copy_c1dd64b75680") : copy("copy_996bf57d15be")} /><HealthLine icon="drop" label={copy("copy_b978536dddbb")} value={advisories.some(item => item.utility === "Water District" && item.status !== "Resolved") ? copy("copy_c1dd64b75680") : copy("copy_996bf57d15be")} /></div><button onClick={() => onNavigate("services")} className="mt-4 text-xs font-bold text-[var(--brand)] hover:underline">{copy("copy_bcc07a11eab9")}</button></article>
+        <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="mb-3 flex items-center justify-between"><h2 className="m-0 text-sm font-bold text-slate-900">{copy("copy_4861614144e2")}</h2><span className="text-xs text-slate-500">{unavailable ? "Unavailable" : `${advisories.length} notices`}</span></div>{unavailable ? <SectionUnavailable title="Map locations" message={unavailable} /> : <><GoogleMap mode="display" announcements={mapAnnouncements(advisories)} height={128} label="Published advisory locations" /><p className="mb-0 mt-2 text-xs text-slate-500">{copy("copy_ad386e3eb489")}{actor.barangay || "your registered service area"}{copy("copy_cdb4ee2aea69")}</p></>}</article>
+        <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="mb-4 mt-0 text-sm font-bold text-slate-900">{copy("copy_7ad5d50411ba")}</h2><div className="space-y-3"><HealthLine icon="pulse" label="CEPALCO notices" value={unavailable ? "Unavailable" : `${advisories.filter(item => item.utility === "CEPALCO" && !["Resolved", "Cancelled"].includes(item.status)).length} active`} /><HealthLine icon="drop" label="Water District notices" value={unavailable ? "Unavailable" : `${advisories.filter(item => item.utility === "Water District" && !["Resolved", "Cancelled"].includes(item.status)).length} active`} /></div><button onClick={() => onNavigate("services")} className="mt-4 text-xs font-bold text-[var(--brand)] hover:underline">{copy("copy_bcc07a11eab9")}</button></article>
       </div>
     </section>
   </div>;
 }
 
-function ResidentAdvisories({ items, workOrders, actor }: { items: Advisory[]; workOrders: WorkOrder[]; actor: Actor }) {
+function ResidentAdvisories({ items, workOrders, actor, errors }: { items: Advisory[]; workOrders: WorkOrder[]; actor: Actor; errors: WorkspaceErrors }) {
   const filterSettings = requiredSetting(settingsFor("resident").filters, "resident.filters");
   const utilityOptions = requiredSetting(filterSettings.utilities, "resident.filters.utilities");
   const statusOptions = requiredSetting(filterSettings.advisoryStatuses, "resident.filters.advisoryStatuses");
@@ -1737,7 +1932,7 @@ function ResidentAdvisories({ items, workOrders, actor }: { items: Advisory[]; w
       <p className="mb-4 mt-0 text-xs text-slate-500">Select a marker to see its utility, affected area, and status.</p>
       <GoogleMap mode="display" announcements={mapAnnouncements(filtered)} height={320} label="Filtered utility announcements" />
     </article>
-    <div className="resident-advisory-grid">{filtered.map(item => <ResidentAdvisoryCard key={`advisory-${item.id}`} item={item} resident={actor} />)}{filteredWorkOrders.map(item => <ResidentWorkCard key={`work-${item.id}`} item={item} />)}{filtered.length + filteredWorkOrders.length === 0 && <div className="col-span-full rounded-2xl border border-slate-200 bg-white p-12 text-center text-sm text-slate-500">{copy("copy_2559f73c5e19")}</div>}</div>
+    <div className="resident-advisory-grid">{filtered.map(item => <ResidentAdvisoryCard key={`advisory-${item.id}`} item={item} resident={actor} />)}{filteredWorkOrders.map(item => <ResidentWorkCard key={`work-${item.id}`} item={item} />)}{filtered.length + filteredWorkOrders.length === 0 && (errors.advisories ? <SectionUnavailable title="Advisories" message={errors.advisories} /> : errors["work orders"] ? <SectionUnavailable title="Work orders" message={errors["work orders"]} /> : <div className="col-span-full rounded-2xl border border-slate-200 bg-white p-12 text-center text-sm text-slate-500">{copy("copy_2559f73c5e19")}</div>)}</div>
   </section>;
 }
 
@@ -1765,16 +1960,56 @@ function StandardAnnouncementCard({
   item,
   compact = false,
   resident,
+  token,
+  onInstagramRetry,
   onStatusUpdate,
 }: {
   portal: "resident" | "cepalco" | "water";
   item: Advisory;
   compact?: boolean;
   resident?: Actor;
+  token?: string | null;
+  onInstagramRetry?: (item: Advisory) => Promise<void>;
   onStatusUpdate?: (item: Advisory) => void;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const imageUrl = announcementImageUrl(item, portal);
+  const [instagramRetrying, setInstagramRetrying] = useState(false);
+  const [imageUrls, setImageUrls] = useState(() => announcementImageUrls(item, portal));
+  const [imageLoadError, setImageLoadError] = useState("");
+  const mediaRef = useRef<HTMLDivElement | null>(null);
+  const imageLoadAttempted = useRef(imageUrls.length > 0);
+  useEffect(() => {
+    if (imageLoadAttempted.current) return;
+    const media = mediaRef.current;
+    if (!media) return;
+    let active = true;
+    let observer: IntersectionObserver | null = null;
+    const loadImages = async () => {
+      if (imageLoadAttempted.current) return;
+      imageLoadAttempted.current = true;
+      try {
+        const images = await loadAdvisoryImages(item.id);
+        if (active) setImageUrls(announcementImageUrls({ ...item, imageUrls: images }, portal));
+      } catch (error) {
+        if (active) setImageLoadError(error instanceof Error ? error.message : "Announcement image could not be loaded.");
+      }
+    };
+    if (typeof IntersectionObserver === "undefined") {
+      void loadImages();
+    } else {
+      observer = new IntersectionObserver(entries => {
+        if (entries.some(entry => entry.isIntersecting)) {
+          observer?.disconnect();
+          void loadImages();
+        }
+      }, { rootMargin: "180px" });
+      observer.observe(media);
+    }
+    return () => {
+      active = false;
+      observer?.disconnect();
+    };
+  }, [item, item.id, portal]);
   const status = item.publicationStatus === "scheduled"
     ? "Scheduled"
     : item.publicationStatus === "failed"
@@ -1784,21 +2019,15 @@ function StandardAnnouncementCard({
     : status === "Cancelled" ? "cancelled"
       : status === "Scheduled" ? "scheduled"
         : status === "Publishing failed" ? "failed" : "active";
-  const area = item.area.toLocaleLowerCase();
-  const residentLocation = [resident?.barangay, resident?.purok ? `Purok ${resident.purok}` : "", resident?.district, resident?.address, resident?.city]
-    .filter(Boolean).join(" ").toLocaleLowerCase();
-  const residentBarangay = resident?.barangay?.trim().toLocaleLowerCase();
-  const matchesBarangay = Boolean(residentBarangay && area.includes(residentBarangay));
-  const purokTargets = area.match(/purok\s+[\w-]+/g) ?? [];
-  const matchesArea = matchesBarangay &&
-    (purokTargets.length === 0 || purokTargets.some(purok => residentLocation.includes(purok)));
   const showAdminActions = portal !== "resident" && !compact;
   const canUpdateStatus = onStatusUpdate && item.publicationStatus !== "scheduled" && item.publicationStatus !== "failed";
   return <article className={`standard-announcement-card ${compact ? "compact" : ""}`}>
-    <div className={`standard-announcement-media ${item.utility === "Water District" ? "water" : "power"}`}>
-      {imageUrl
-        ? <img src={imageUrl} alt={`Announcement: ${item.title}`} />
-        : <div className="standard-announcement-placeholder" aria-hidden="true"><Icon name={item.utility === "Water District" ? "drop" : "pulse"} /><span>{item.utility}</span></div>}
+    <div ref={mediaRef} className={`standard-announcement-media ${item.utility === "Water District" ? "water" : "power"}`}>
+      {imageUrls.length === 1
+        ? <img src={imageUrls[0]} alt={`Announcement: ${item.title}`} />
+        : imageUrls.length > 1
+          ? <div className="standard-announcement-gallery">{imageUrls.map((imageUrl, index) => <img key={`${imageUrl}-${index}`} src={imageUrl} alt={`Announcement: ${item.title}, image ${index + 1}`} />)}</div>
+        : <div className="standard-announcement-placeholder" aria-hidden={imageLoadError ? undefined : "true"}><Icon name={item.utility === "Water District" ? "drop" : "pulse"} /><span>{imageLoadError ? "Image unavailable" : item.utility}</span></div>}
       <div className="standard-announcement-meta">
         <span className={`standard-announcement-status ${statusTone}`}>{status}</span>
         <time>{formatResidentDateTime(item.scheduledAt || item.createdAt)}</time>
@@ -1811,9 +2040,14 @@ function StandardAnnouncementCard({
       </div>
       <h2>{item.title}</h2>
       <p className="standard-announcement-area">{item.reference} · {item.area}</p>
-      {resident && <span className={`standard-announcement-match ${matchesArea ? "matched" : "unmatched"}`}>
-        {matchesArea ? "May affect your registered area" : "Check affected area against your address"}
-      </span>}
+      {resident && <span className="standard-announcement-match matched">Audience: all residents</span>}
+      <dl className="my-3 grid gap-1.5 rounded-lg bg-slate-50 p-3 text-xs text-slate-700 sm:grid-cols-2">
+        <div><dt className="inline font-semibold">Location: </dt><dd className="inline">{item.location || item.area}</dd></div>
+        <div><dt className="inline font-semibold">Type of Service: </dt><dd className="inline">{item.type}</dd></div>
+        <div><dt className="inline font-semibold">Status: </dt><dd className="inline">{item.serviceStatus || item.status}</dd></div>
+        <div><dt className="inline font-semibold">Affecting Area: </dt><dd className="inline">{item.area}</dd></div>
+        <div><dt className="inline font-semibold">Provider: </dt><dd className="inline">{item.provider || item.utility}</dd></div>
+      </dl>
       <p className={`standard-announcement-details ${detailsOpen ? "expanded" : ""}`}>{item.details}</p>
       {(item.serviceStartsAt || item.estimatedRestorationAt) && <p className="standard-announcement-window">
         {item.serviceStartsAt && <>Starts {formatResidentDateTime(item.serviceStartsAt)}</>}
@@ -1821,6 +2055,21 @@ function StandardAnnouncementCard({
         {item.estimatedRestorationAt && <>Est. restoration {formatResidentDateTime(item.estimatedRestorationAt)}</>}
       </p>}
       <SocialPostLinks item={item} />
+      {showAdminActions && token && onInstagramRetry && !item.instagramUrl &&
+        imageUrls.length > 0 && item.publicationStatus === "published" &&
+        <button
+          type="button"
+          disabled={instagramRetrying}
+          onClick={async () => {
+            setInstagramRetrying(true);
+            try {
+              await onInstagramRetry(item);
+            } finally {
+              setInstagramRetrying(false);
+            }
+          }}
+          className="mb-2.5 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:border-[var(--brand)] disabled:opacity-60"
+        >{instagramRetrying ? "Publishing to Instagram…" : "Publish to Instagram"}</button>}
       <div className="standard-announcement-actions">
         <button type="button" onClick={() => setDetailsOpen(open => !open)}>
           {detailsOpen ? "Show less" : "Read full notice"}
@@ -1845,37 +2094,25 @@ function HealthLine({ icon, label, value }: { icon: string; label: string; value
   return <div className="flex items-center justify-between border-b border-slate-100 pb-3 last:border-0 last:pb-0"><span className="flex items-center gap-2 text-slate-600"><Icon name={icon} className="h-4 w-4 text-[var(--brand)]" />{label}</span><strong className="text-[10px] text-slate-800">{value}</strong></div>;
 }
 
-function MiniMap({ portal }: { portal: Portal }) {
-  const water = portal === "water";
-  const settings = settingsFor(portal);
-  const markers = requiredSetting(settings.maps?.mini, `${portal}.maps.mini`);
-  const label = requiredSetting(settings.mapLabels?.mini, `${portal}.mapLabels.mini`);
-  return <div className={`relative h-32 overflow-hidden rounded-lg bg-gradient-to-br from-[#d8e9e6] via-[#eef2ea] to-[#d9e7ee] ${water ? "water-mini-map" : ""}`}><span className="absolute left-3 top-3 text-[8px] font-extrabold tracking-wide text-slate-600">{label}</span>{markers.map((marker, index) => <span key={`${marker.kind}-${index}`} className={`map-pin ${marker.kind} absolute h-5 w-5 rounded-full border-4 border-white bg-rose-700 shadow-md`} style={{ left: `${marker.left}%`, top: `${marker.top}%` }} />)}</div>;
+function MiniMap({ portal, advisories, unavailable }: { portal: Portal; advisories: Advisory[]; unavailable?: string }) {
+  const label = portal === "water" ? "Water advisory locations" : "Utility advisory locations";
+  return unavailable ? <SectionUnavailable title="Map locations" message={unavailable} /> : <GoogleMap mode="display" announcements={mapAnnouncements(advisories)} height={128} label={label} />;
 }
 
-function ResidentCommunityMap() {
-  const settings = settingsFor("resident");
-  const markers = requiredSetting(settings.maps?.community, "resident.maps.community");
-  const label = requiredSetting(settings.mapLabels?.community, "resident.mapLabels.community");
-  return <div className="resident-community-map relative h-32 overflow-hidden rounded-lg"><span className="absolute left-3 top-3 text-[8px] font-extrabold tracking-wide text-slate-600">{label}</span>{markers.map((marker, index) => <span key={`${marker.kind}-${index}`} className={`resident-map-pin ${marker.kind} absolute`} style={{ left: `${marker.left}%`, top: `${marker.top}%` }} />)}</div>;
-}
-
-function PressureZones({ readings }: { readings: NetworkReading[] }) {
+function PressureZones({ readings, unavailable }: { readings: NetworkReading[]; unavailable?: string }) {
   const networkStatus = requiredSetting(settingsFor("water").networkStatus, "water.networkStatus");
-  return <article className="rounded-xl border border-slate-200 bg-white p-5"><div className="mb-4"><h2 className="m-0 text-base font-bold text-slate-900">{copy("copy_befbc9c07735")}</h2><p className="mb-0 mt-1 text-[10px] text-slate-500">{copy("copy_ba677c4a34ce")}</p></div>{readings.length ? <div className="divide-y divide-slate-100">{readings.map(reading => { const status = reading.pressurePsi < networkStatus.pressureWatchThresholdPsi ? networkStatus.watch : networkStatus.normal; return <div key={reading.district} className="grid grid-cols-[1fr_52px_auto] items-center gap-3 py-3 first:pt-0 last:pb-0 sm:grid-cols-[1.1fr_1fr_52px_auto]"><span><strong className="block text-[11px] text-slate-800">{reading.district}</strong><small className="text-[9px] text-slate-500">{reading.area}</small></span><span className="hidden h-1.5 overflow-hidden rounded-full bg-slate-100 sm:block"><i className={`block h-full rounded-full ${status === networkStatus.watch ? "bg-amber-500" : "bg-cyan-600"}`} style={{ width: `${Math.min(100, reading.pressurePsi * 2)}%` }} /></span><strong className="text-[10px] text-slate-800">{reading.pressurePsi} {copy("copy_4533cd03a204")}</strong><span className={`rounded-full px-2 py-1 text-[9px] font-bold ${status === networkStatus.watch ? "bg-amber-50 text-amber-800" : "bg-emerald-50 text-emerald-800"}`}>{status}</span></div>; })}</div> : <Empty message={copy("copy_e7c9027da829")} />}</article>;
+  return <article className="rounded-xl border border-slate-200 bg-white p-5"><div className="mb-4"><h2 className="m-0 text-base font-bold text-slate-900">{copy("copy_befbc9c07735")}</h2><p className="mb-0 mt-1 text-[10px] text-slate-500">Pressure readings saved by the utility.</p></div>{unavailable ? <SectionUnavailable title="Network readings" message={unavailable} /> : readings.length ? <div className="divide-y divide-slate-100">{readings.map(reading => { const status = reading.pressurePsi < networkStatus.pressureWatchThresholdPsi ? networkStatus.watch : networkStatus.normal; return <div key={reading.district} className="grid grid-cols-[1fr_52px_auto] items-center gap-3 py-3 first:pt-0 last:pb-0 sm:grid-cols-[1.1fr_1fr_52px_auto]"><span><strong className="block text-[11px] text-slate-800">{reading.district}</strong><small className="text-[9px] text-slate-500">{reading.area}</small></span><span className="hidden h-1.5 overflow-hidden rounded-full bg-slate-100 sm:block"><i className={`block h-full rounded-full ${status === networkStatus.watch ? "bg-amber-500" : "bg-cyan-600"}`} style={{ width: `${Math.min(100, reading.pressurePsi * 2)}%` }} /></span><strong className="text-[10px] text-slate-800">{reading.pressurePsi} {copy("copy_4533cd03a204")}</strong><span className={`rounded-full px-2 py-1 text-[9px] font-bold ${status === networkStatus.watch ? "bg-amber-50 text-amber-800" : "bg-emerald-50 text-emerald-800"}`}>{status}</span></div>; })}</div> : <Empty message={copy("copy_e7c9027da829")} />}</article>;
 }
 
-function CepalcoOperationsSummary() {
-  const dashboard = requiredSetting(settingsFor("cepalco").dashboard, "cepalco.dashboard");
+function CepalcoOperationsSummary({ advisories, unavailable }: { advisories: Advisory[]; unavailable?: string }) {
+  const activeCount = advisories.filter(item => !["Resolved", "Cancelled"].includes(item.status)).length;
   return <article className="rounded-xl border border-slate-200 bg-white p-5">
     <div className="mb-4">
-      <h2 className="m-0 text-base font-bold text-slate-900">Grid operations</h2>
-      <p className="mb-0 mt-1 text-[10px] text-slate-500">Current feeder and field response status.</p>
+      <h2 className="m-0 text-base font-bold text-slate-900">Advisory operations</h2>
+      <p className="mb-0 mt-1 text-[10px] text-slate-500">Counts from saved utility records.</p>
     </div>
     <div className="space-y-3 text-xs">
-      <HealthLine icon="pulse" label="Feeders online" value={`${dashboard.feedersOnline ?? "—"} · ${dashboard.feederCount ?? "—"}`} />
-      <HealthLine icon="calendar" label="Average restoration" value={`${dashboard.averageRestoration ?? "—"} · ${dashboard.restorationTarget ?? "—"}`} />
-      <HealthLine icon="people" label="Crews in field" value={String(dashboard.fieldCrews ?? "—")} />
+      <HealthLine icon="alert" label="Active advisories" value={unavailable ? "Unavailable" : String(activeCount)} />
     </div>
   </article>;
 }
@@ -1898,7 +2135,7 @@ function DataCard({ item, page, compact = false }: { item: Advisory | WorkOrder 
   </article>;
 }
 
-function WaterAdvisories({ items, token, onStatusUpdate }: { items: Advisory[]; token: string | null; onStatusUpdate: (item: Advisory) => void }) {
+function WaterAdvisories({ items, token, onStatusUpdate, onInstagramRetry, loadError }: { items: Advisory[]; token: string | null; onStatusUpdate: (item: Advisory) => void; onInstagramRetry: (item: Advisory) => Promise<void>; loadError?: string }) {
   const [query, setQuery] = useState("");
   const [featuredOpen, setFeaturedOpen] = useState(false);
   const filtered = items.filter(item => `${item.title} ${item.area} ${item.reference} ${item.details}`.toLowerCase().includes(query.toLowerCase()));
@@ -1910,8 +2147,8 @@ function WaterAdvisories({ items, token, onStatusUpdate }: { items: Advisory[]; 
       {featuredOpen && <p className="water-featured-details">{copy("copy_917ffee3fc75")}</p>}
     </article>
     <div className="water-advisory-grid">
-      {filtered.map(item => <WaterAdvisoryCard key={item.id} item={item} onStatusUpdate={onStatusUpdate} />)}
-      {filtered.length === 0 && <div className="water-empty">{copy("copy_b371347d3915")}</div>}
+      {filtered.map(item => <WaterAdvisoryCard key={item.id} item={item} token={token} onInstagramRetry={onInstagramRetry} onStatusUpdate={onStatusUpdate} />)}
+      {filtered.length === 0 && (loadError ? <SectionUnavailable title="Advisories" message={loadError} /> : <div className="water-empty">{copy("copy_b371347d3915")}</div>)}
     </div>
     <ActivityLog portal="water" token={token} />
   </section>;
@@ -1931,18 +2168,61 @@ function ActivityLog({ portal, token }: { portal: "cepalco" | "water"; token: st
   return <section className="mt-5 rounded-xl border border-slate-200 bg-white p-4">
     <h2 className="m-0 text-sm font-bold text-slate-900">Activity log</h2>
     <p className="mb-3 mt-1 text-xs text-slate-500">Recent advisory publishing and status changes for this utility.</p>
-    {loadError ? <p role="status" className="mb-0 text-xs text-amber-800">Activity history is unavailable: {loadError}. Apply the activity log database migration to enable it.</p> : entries.length ? <ol className="m-0 space-y-2 p-0">{entries.map(entry => <li key={entry.id} className="list-none border-t border-slate-100 pt-2 text-xs"><div className="flex flex-wrap justify-between gap-2"><strong className="text-slate-800">{entry.action}</strong><time className="text-slate-400">{formatResidentDateTime(entry.createdAt)}</time></div><p className="mb-0 mt-1 text-slate-600">{entry.summary}</p></li>)}</ol> : <p className="mb-0 text-xs text-slate-500">No activity has been recorded yet.</p>}
+    {loadError ? <p role="status" className="mb-0 text-xs text-amber-800">Activity history is unavailable: {loadError}. Apply the activity log database migration to enable it.</p> : entries.length ? <ol className="m-0 space-y-2 p-0">{entries.map(entry => <li key={entry.id} className="list-none border-t border-slate-100 pt-2 text-xs"><div className="flex flex-wrap justify-between gap-2"><strong className="text-slate-800">{entry.action}</strong><time className="text-slate-400">{formatResidentDateTime(entry.createdAt)}</time></div><ActivitySummary action={entry.action} summary={entry.summary} /></li>)}</ol> : <p className="mb-0 text-xs text-slate-500">No activity has been recorded yet.</p>}
   </section>;
 }
 
-function WaterAdvisoryCard({ item, onStatusUpdate }: { item: Advisory; onStatusUpdate: (item: Advisory) => void }) {
-  return <StandardAnnouncementCard portal="water" item={item} onStatusUpdate={onStatusUpdate} />;
+function ActivitySummary({ action, summary }: { action: string; summary: string }) {
+  if (action !== "Notification dispatch results") {
+    return <p className="mb-0 mt-1 break-words text-slate-600">{summary}</p>;
+  }
+  try {
+    const result: unknown = JSON.parse(summary);
+    if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Invalid notification summary.");
+    const record = result as Record<string, unknown>;
+    const email = record.email && typeof record.email === "object" ? record.email as Record<string, unknown> : null;
+    const social = record.social && typeof record.social === "object" ? record.social as Record<string, unknown> : null;
+    const platforms = Array.isArray(social?.platforms) ? social.platforms as Array<Record<string, unknown>> : [];
+    const messages = [
+      email ? `Email: ${Number(email.sent) || 0} sent${Number(email.failed) ? `, ${Number(email.failed)} failed` : ""}` : "",
+      ...platforms.map(platform => `${String(platform.platform || "Social")}: ${String(platform.status || "unknown")}`),
+      Number(record.simulatedSmsRecords) ? `Simulated SMS: ${Number(record.simulatedSmsRecords)} queued` : "",
+    ].filter(Boolean);
+    return <div className="mt-2">
+      <p className="mb-0 break-words font-medium text-slate-700">{messages.join(" · ") || "No channel delivery details were recorded."}</p>
+      <details className="mt-1">
+        <summary className="w-fit cursor-pointer text-[11px] font-semibold text-slate-500 hover:text-slate-800">View delivery details</summary>
+        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-slate-50 p-3 text-[10px] leading-relaxed text-slate-600">{JSON.stringify(record, null, 2)}</pre>
+      </details>
+    </div>;
+  } catch {
+    return <details className="mt-2">
+      <summary className="w-fit cursor-pointer text-[11px] font-semibold text-amber-800">Delivery summary could not be formatted</summary>
+      <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-amber-50 p-3 text-[10px] leading-relaxed text-amber-950">{summary}</pre>
+    </details>;
+  }
 }
 
-function WaterReports({ reports, onStatusUpdate }: { reports: ServiceReport[]; onStatusUpdate: (report: ServiceReport) => void }) {
+function WaterAdvisoryCard({ item, token, onInstagramRetry, onStatusUpdate }: { item: Advisory; token: string | null; onInstagramRetry: (item: Advisory) => Promise<void>; onStatusUpdate: (item: Advisory) => void }) {
+  return <StandardAnnouncementCard portal="water" item={item} token={token} onInstagramRetry={onInstagramRetry} onStatusUpdate={onStatusUpdate} />;
+}
+
+function CepalcoReports({ reports, onStatusUpdate, unavailable }: { reports: ServiceReport[]; onStatusUpdate: (report: ServiceReport) => void; unavailable?: string }) {
+  return <section className="grid gap-3 xl:grid-cols-2">
+    {unavailable ? <SectionUnavailable title="Resident reports" message={unavailable} /> : reports.map(report => <article key={report.id} className="rounded-xl border border-slate-200 bg-white p-4">
+      <div className="flex items-start justify-between gap-3"><span className="rounded-full bg-amber-50 px-2 py-1 text-[9px] font-bold text-amber-800">{report.status}</span><time className="text-[9px] text-slate-400">{formatResidentDateTime(report.createdAt)}</time></div>
+      <h2 className="mb-1 mt-3 text-sm font-bold text-slate-900">{report.title}</h2><p className="mb-2 text-[10px] text-slate-500">{report.reference} · {report.area}</p>
+      {report.details && <p className="text-xs leading-relaxed text-slate-600">{report.details}</p>}
+      <button type="button" onClick={() => onStatusUpdate(report)} className="mt-3 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:border-[var(--brand)] hover:bg-[var(--brand-soft)]">Update report status</button>
+    </article>)}
+    {!unavailable && reports.length === 0 && <Empty message="No resident reports have been submitted yet." />}
+  </section>;
+}
+
+function WaterReports({ reports, onStatusUpdate, unavailable }: { reports: ServiceReport[]; onStatusUpdate: (report: ServiceReport) => void; unavailable?: string }) {
   return <section className="water-page water-reports admin-page-stack">
     <div className="water-report-grid">
-      {reports.map(report => <article className="water-report-card" key={report.id}>
+      {!unavailable && reports.map(report => <article className="water-report-card" key={report.id}>
         <div className="water-report-cover" aria-hidden="true"><span className="water-report-cover-mark"><Icon name="drop" className="h-9 w-9" /></span><span className="water-report-cover-label">Water service report</span></div>
         <div className="water-report-content">
           <div className="water-report-card-meta"><span className={`water-status ${report.status === "Resolved" ? "resolved" : report.status === "Crew dispatched" ? "dispatched" : "received"}`}>{report.status}</span><time>{formatResidentDateTime(report.createdAt)}</time></div>
@@ -1953,33 +2233,33 @@ function WaterReports({ reports, onStatusUpdate }: { reports: ServiceReport[]; o
         </div>
       </article>)}
     </div>
-    {reports.length === 0 && <div className="water-empty">{copy("copy_e082c3906119")}</div>}
+    {unavailable ? <SectionUnavailable title="Resident reports" message={unavailable} /> : reports.length === 0 && <div className="water-empty">{copy("copy_e082c3906119")}</div>}
   </section>;
 }
-function WaterPublishForm({ busy, token, onCancel, onSubmit }: { busy: boolean; token: string | null; onCancel: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
-  const categories = requiredSetting(settingsFor("water").categories, "water.categories");
-  const priorities = requiredSetting(settingsFor("water").priorities, "water.priorities");
-  const [category, setCategory] = useState(() => readWaterDraftValue("category") || categories[0]?.value || "");
-  const [selectedArea, setSelectedArea] = useState(() => readWaterDraftValue("area"));
+function WaterPublishForm({ portal, busy, token, onCancel, onSubmit }: { portal: "water" | "cepalco"; busy: boolean; token: string | null; onCancel: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+  const isWater = portal === "water";
+  const utilityName = isWater ? "Water District" : "CEPALCO";
+  const categories = requiredSetting(settingsFor(portal).categories, `${portal}.categories`);
+  const priorities = requiredSetting(settingsFor(portal).priorities, `${portal}.priorities`);
+  const [category, setCategory] = useState(() => readAnnouncementDraftValue(portal, "category") || categories[0]?.value || "");
+  const [selectedArea, setSelectedArea] = useState(() => readAnnouncementDraftValue(portal, "area"));
   const [draftSaved, setDraftSaved] = useState(false);
   const [selectedLocation, setSelectedLocation] = useState<CommunityAlertMapLocation | null>(null);
-  const [channels, setChannels] = useState<string[]>(() => readWaterDraftChannels());
-  const [schedule, setSchedule] = useState(() => readWaterDraftValue("schedule") === "true");
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [detailsLength, setDetailsLength] = useState(() => readWaterDraftValue("details").length);
-  useEffect(() => {
-    if (!imagePreview) return;
-    return () => URL.revokeObjectURL(imagePreview);
-  }, [imagePreview]);
+  const [channels, setChannels] = useState<string[]>(() => readAnnouncementDraftChannels(portal));
+  const [schedule, setSchedule] = useState(() => readAnnouncementDraftValue(portal, "schedule") === "true");
+  const [detailsLength, setDetailsLength] = useState(() => readAnnouncementDraftValue(portal, "details").length);
+  const [serviceStartsAt, setServiceStartsAt] = useState(() => readAnnouncementDraftValue(portal, "serviceStartsAt"));
+  const [estimatedRestorationAt, setEstimatedRestorationAt] = useState(() => readAnnouncementDraftValue(portal, "estimatedRestorationAt"));
+  const serviceStatuses = ["Upcoming Maintenance Interruption", "Active Service Interruption", "Resolved", "Cancelled"];
   const saveDraft = (form: HTMLFormElement | null) => {
     if (!form) return;
     new FormData(form).forEach((value, name) => {
       if (value instanceof File || name === "channels") return;
-      localStorage.setItem(`civicalert:water:draft:${name}`, String(value));
+      localStorage.setItem(`civicalert:${portal}:draft:${name}`, String(value));
     });
-    localStorage.setItem("civicalert:water:draft:category", category);
-    localStorage.setItem("civicalert:water:draft:schedule", String(schedule));
-    localStorage.setItem("civicalert:water:draft:channels", channels.join("|"));
+    localStorage.setItem(`civicalert:${portal}:draft:category`, category);
+    localStorage.setItem(`civicalert:${portal}:draft:schedule`, String(schedule));
+    localStorage.setItem(`civicalert:${portal}:draft:channels`, channels.join("|"));
     setDraftSaved(true);
   };
   const toggleChannel = (channel: string) => {
@@ -1988,77 +2268,86 @@ function WaterPublishForm({ busy, token, onCancel, onSubmit }: { busy: boolean; 
       : [...current, channel]);
     setDraftSaved(false);
   };
-  return <form className="water-page water-publish-form" onSubmit={onSubmit}>
-    <div className="water-publish-top"><div><span>WATER OPERATIONS / PUBLIC NOTICES</span><h2>Publish water advisory</h2></div><div><button type="button" onClick={onCancel}>Cancel</button><button type="button" onClick={event => saveDraft(event.currentTarget.form)}>Save draft</button><button type="submit" className="water-primary" disabled={busy}>{busy ? "Publishing…" : "Publish advisory"}</button></div></div>
+  return <form className={`water-page water-publish-form ${isWater ? "" : "cepalco-publish-layout"}`} onSubmit={onSubmit}>
+    <div className="water-publish-top"><div><span>{utilityName.toUpperCase()} OPERATIONS / PUBLIC NOTICES</span><h2>{isWater ? "Publish water advisory" : "Publish service advisory"}</h2></div><div><button type="button" onClick={onCancel}>Cancel</button><button type="button" onClick={event => saveDraft(event.currentTarget.form)}>Save draft</button><button type="submit" className="water-primary" disabled={busy}>{busy ? "Publishing…" : isWater ? "Publish advisory" : "Publish announcement"}</button></div></div>
     <section className="water-form-card">
       <div><h3>Classify the service update</h3><p>Choose the advisory type and response priority for this notice.</p></div>
       <div className="water-category-grid">{categories.map(({ value, description }) => <button type="button" aria-pressed={category === value} className={category === value ? "selected" : ""} key={value} onClick={() => { setCategory(value); setDraftSaved(false); }}><strong>{value}</strong><small>{description}</small></button>)}</div>
       <input type="hidden" name="category" value={category} />
-      <label><span>Priority</span><select name="priority" defaultValue={readWaterDraftValue("priority") || "Urgent"} onChange={() => setDraftSaved(false)}>{priorities.map(priority => <option key={priority}>{priority}</option>)}</select></label>
+      <label><span>Priority</span><select name="priority" defaultValue={readAnnouncementDraftValue(portal, "priority") || (isWater ? "Urgent" : "High")} onChange={() => setDraftSaved(false)}>{priorities.map(priority => <option key={priority}>{priority}</option>)}</select></label>
     </section>
     <section className="water-form-card">
-      <div><h3>Advisory headline and affected area</h3><p>Keep the headline brief and identify the impacted district or neighborhood.</p></div>
-      <label><span>Advisory headline</span><input name="title" required maxLength={160} defaultValue={readWaterDraftValue("title")} onChange={() => setDraftSaved(false)} placeholder="Summarize the service update" /></label>
-      <AnnouncementAreaPurokSelect portal="water" onChange={area => { setSelectedArea(area); setSelectedLocation(null); setDraftSaved(false); }} />
+      <div><h3>What is happening?</h3><p>Give the update a short title. It will be shared with all residents.</p></div>
+      <label><span>Advisory headline</span><input name="title" required maxLength={160} defaultValue={readAnnouncementDraftValue(portal, "title")} onChange={() => setDraftSaved(false)} placeholder="Summarize the service update" /></label>
+      <label><span>Location (barangay and city)</span><input name="location" required maxLength={160} defaultValue={readAnnouncementDraftValue(portal, "location")} onChange={() => setDraftSaved(false)} placeholder="For example, Carmen, Cagayan de Oro City" /></label>
+      <label><span>Affected barangay or service area</span><ServiceAreaDropdown name="area" required value={selectedArea} onChange={event => { setSelectedArea(event.target.value); setSelectedLocation(null); setDraftSaved(false); }} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-3 text-sm font-normal text-slate-800" /></label>
+      <label><span>Service status</span><select name="serviceStatus" required defaultValue={readAnnouncementDraftValue(portal, "serviceStatus") || serviceStatuses[0]} onChange={() => setDraftSaved(false)}>{serviceStatuses.map(status => <option key={status}>{status}</option>)}</select></label>
     </section>
     <section className="water-form-card">
-      <div><h3>Service window</h3><p>Include the expected work start and estimated restoration time when known.</p></div>
+      <div><h3>When will service be affected?</h3><p>Choose the service provider. Add times when known; you can leave either time blank if it is not confirmed.</p></div>
+      <label><span>Provider</span><input name="provider" required maxLength={120} defaultValue={readAnnouncementDraftValue(portal, "provider") || (isWater ? "Cagayan de Oro Water District (COWD)" : "CEPALCO")} onChange={() => setDraftSaved(false)} /></label>
       <div className="water-timeline-grid">
-        <label><span>Advisory start</span><input name="serviceStartsAt" type="datetime-local" defaultValue={readWaterDraftValue("serviceStartsAt")} onChange={() => setDraftSaved(false)} /></label>
-        <label><span>Estimated restoration</span><input name="estimatedRestorationAt" type="datetime-local" defaultValue={readWaterDraftValue("estimatedRestorationAt")} onChange={() => setDraftSaved(false)} /></label>
+        <label><span>Scheduled start</span><input name="serviceStartsAt" type="datetime-local" value={serviceStartsAt} onChange={event => { setServiceStartsAt(event.target.value); setDraftSaved(false); }} /></label>
+        <label><span>Estimated restoration</span><input name="estimatedRestorationAt" type="datetime-local" value={estimatedRestorationAt} onChange={event => { setEstimatedRestorationAt(event.target.value); setDraftSaved(false); }} /></label>
       </div>
     </section>
     <section className="water-form-card">
-      <div className="water-section-heading"><div><h3>Public notice and guidance</h3><p>Explain the impact and any practical steps residents should take.</p></div><small>{detailsLength} / 1800</small></div>
-      <label><span>Public advisory text</span><textarea name="details" required rows={6} maxLength={1800} defaultValue={readWaterDraftValue("details")} onChange={event => { setDetailsLength(event.target.value.length); setDraftSaved(false); }} placeholder="Describe the service issue, affected customers, expected timing, and any safety guidance." /></label>
+      <div className="water-section-heading"><div><h3>What residents need to know</h3><p>Explain what is happening and what residents should do.</p></div><small>{detailsLength} / 1800 characters</small></div>
+      <label><span>Description</span><textarea name="details" required rows={6} maxLength={1800} defaultValue={readAnnouncementDraftValue(portal, "details")} onChange={event => { setDetailsLength(event.target.value.length); setDraftSaved(false); }} placeholder="Describe the service issue, affected customers, expected timing, and any safety guidance." /></label>
     </section>
     <section className="water-form-card">
-      <div><h3>Pin the affected area</h3><p>Optionally mark the service location on the map.</p></div>
-      <input type="hidden" name="latitude" value={selectedLocation?.latitude ?? ""} />
-      <input type="hidden" name="longitude" value={selectedLocation?.longitude ?? ""} />
-      <GoogleMap mode="picker" height={250} label="Select affected service location" selectedArea={selectedArea} onLocationSelected={setSelectedLocation} />
-      <p className="water-selection-note">{selectedLocation ? `Selected point: ${selectedLocation.latitude.toFixed(5)}, ${selectedLocation.longitude.toFixed(5)}. Click elsewhere on the map to adjust it.` : "Choose an affected area above to place a pin automatically, or click the map to place one manually."}</p>
+      <div><h3>Show the location on a map (optional)</h3><p>Click the map to add a marker. You can skip this step.</p></div>
+      <GoogleMap mode="picker" height={250} label="Select affected service location" selectedArea={selectedArea} selectedLocation={selectedLocation} onLocationSelected={setSelectedLocation} />
+      <details className="rounded-lg border border-slate-200 p-3">
+        <summary className="cursor-pointer text-sm font-semibold text-slate-700">Enter map coordinates instead</summary>
+        <div className="mt-3"><CoordinateInputs value={selectedLocation} onChange={setSelectedLocation} /></div>
+      </details>
+      <p aria-live="polite" className="water-selection-note">{selectedLocation ? "Map location selected. Click elsewhere on the map to change it." : "No map location selected. This is optional."}</p>
     </section>
     <section className="water-form-card">
       <div><h3>Notice image</h3><p>Add an image to include it with selected Facebook, Instagram, and Gmail delivery. Instagram always requires an image.</p></div>
-      <label><span>Image file</span><input type="file" name="announcementImage" accept="image/jpeg,image/png,image/webp" onChange={event => { const file = event.target.files?.[0]; setImagePreview(file ? URL.createObjectURL(file) : null); setDraftSaved(false); }} /><small>JPEG, PNG, or WebP, up to 15 MB. Oversized images are optimized automatically before upload.</small></label>
-      {imagePreview && <img src={imagePreview} alt="Selected advisory image preview" className="water-image-preview" />}
+      <AnnouncementImagePicker
+        label="Images"
+        helpText="Add up to 10 JPEG, PNG, or WebP images. Each is automatically optimized before publishing."
+        labelClass=""
+        onSelectionChange={() => setDraftSaved(false)}
+      />
     </section>
     <section className="water-form-card">
-      <div><h3>Announcement channels</h3><p>Select the channels you want to use. Choose at least one.</p></div>
+      <div><h3>Where should we share this update?</h3><p>Choose one or more ways to share the announcement with residents and the community.</p></div>
       <div className="water-channel-list">
         {([
           ["gmail", "Email residents", "Email every registered resident with the announcement image."],
           ["facebook", "Facebook", "Publish every announcement to the connected utility page."],
           ["instagram", "Instagram", "Publish an image and caption to the connected account."],
-          ["sms", "Resident inbox alert", "Create simulated inbox alerts; no text messages are sent."],
         ] as const).map(([value, title, description]) => <label className="water-channel-row" key={value}>
           <span><strong>{title}</strong><small>{description}</small></span>
           <input type="checkbox" name="channels" value={value} checked={channels.includes(value)} onChange={() => toggleChannel(value)} />
         </label>)}
       </div>
-      <SocialConnectionStatus portal="water" token={token} />
-      <GmailConnection portal="water" token={token} />
+      <SocialConnectionStatus portal={portal} token={token} />
+      <GmailConnection portal={portal} token={token} />
     </section>
     <section className="water-form-card">
       <div><h3>Publish timing</h3><p>Publish when ready or set a future release time.</p></div>
       <label className="water-schedule-toggle"><input type="checkbox" checked={schedule} onChange={event => { setSchedule(event.target.checked); setDraftSaved(false); }} /> Schedule this advisory for later</label>
-      {schedule && <label>Publish date and time<input name="scheduledAt" type="datetime-local" required min={minimumLocalDateTime()} defaultValue={readWaterDraftValue("scheduledAt")} onChange={() => setDraftSaved(false)} /></label>}
+      {schedule && <label>Publish date and time<input name="scheduledAt" type="datetime-local" required min={minimumLocalDateTime()} defaultValue={readAnnouncementDraftValue(portal, "scheduledAt")} onChange={() => setDraftSaved(false)} /></label>}
       {!schedule && <input type="hidden" name="scheduledAt" value="" />}
     </section>
     <div className="water-publish-footer">{draftSaved && <span className="water-draft-saved" role="status">Draft saved in this browser.</span>}<button type="button" onClick={onCancel}>Cancel</button><button type="button" onClick={event => saveDraft(event.currentTarget.form)}>Save draft</button><button className="water-primary" type="submit" disabled={busy}>{busy ? "Publishing…" : schedule ? "Schedule advisory" : "Publish advisory"}</button></div>
   </form>;
 }
 
-function readWaterDraftValue(name: string) {
-  return localStorage.getItem(`civicalert:water:draft:${name}`) || "";
+function readAnnouncementDraftValue(portal: "water" | "cepalco", name: string) {
+  return localStorage.getItem(`civicalert:${portal}:draft:${name}`) || "";
 }
 
-function readWaterDraftChannels(): string[] {
-  const savedChannels = localStorage.getItem("civicalert:water:draft:channels");
+function readAnnouncementDraftChannels(portal: "water" | "cepalco"): string[] {
+  const savedChannels = localStorage.getItem(`civicalert:${portal}:draft:channels`);
   if (savedChannels === null) return [...DEFAULT_ANNOUNCEMENT_CHANNELS];
   const channels = savedChannels.split("|");
-  return channels.filter(channel => ["gmail", "facebook", "instagram", "sms"].includes(channel));
+  const selectedChannels = channels.filter(channel => ["gmail", "facebook", "instagram"].includes(channel));
+  return selectedChannels.length ? selectedChannels : [...DEFAULT_ANNOUNCEMENT_CHANNELS];
 }
 
 function WorkTable({ items }: { items: WorkOrder[] }) {
@@ -2066,39 +2355,39 @@ function WorkTable({ items }: { items: WorkOrder[] }) {
   return <div className="overflow-x-auto"><table className="w-full min-w-[520px] text-left"><thead><tr className="border-b border-slate-100 text-[9px] uppercase tracking-wide text-slate-400"><th className="px-2 py-2">{copy("copy_ce02285cc14e")}</th><th className="px-2 py-2">{copy("copy_024dc204d7ba")}</th><th className="px-2 py-2">{copy("copy_19734a1b58ca")}</th><th className="px-2 py-2">{copy("copy_920e413c7d41")}</th></tr></thead><tbody>{items.map(item => <tr key={item.id} className="border-b border-slate-50 text-[10px] text-slate-600 last:border-0"><td className="px-2 py-3"><strong className="block text-slate-800">{item.title}</strong><span className="text-[9px] text-slate-400">{item.reference}</span></td><td className="px-2 py-3">{item.area}</td><td className="px-2 py-3">{formatResidentDateTime(item.startsAt)}</td><td className="px-2 py-3"><span className="rounded-full bg-blue-50 px-2 py-1 text-[9px] font-bold text-blue-800">{item.status}</span></td></tr>)}</tbody></table></div>;
 }
 
-function Network({ portal, advisories, network }: { portal: Portal; advisories: Advisory[]; network: NetworkReading[] }) {
+function Network({ portal, advisories, network, errors }: { portal: Portal; advisories: Advisory[]; network: NetworkReading[]; errors: WorkspaceErrors }) {
   const water = portal === "water";
-  const mapLabel = requiredSetting(settingsFor(portal).mapLabels?.network, `${portal}.mapLabels.network`);
   return <div className="space-y-4">
     <article className="rounded-xl border border-slate-200 bg-white p-5">
-      <div className="mb-4 flex items-center justify-between gap-3"><div><h2 className="m-0 text-base font-bold text-slate-900">{water ? copy("copy_a057083f0c39") : copy("copy_10811357280f")}</h2><p className="mb-0 mt-1 text-[10px] text-slate-500">{copy("copy_447c01316fb5")}</p></div><span className="rounded-full bg-emerald-50 px-2 py-1 text-[9px] font-bold text-emerald-800">{copy("copy_1dc83f605edf")}</span></div>
-      {/* UPDATED: Replace the simulated network map with actual advisory location markers. */}
-      <GoogleMap mode="display" announcements={mapAnnouncements(advisories)} height={360} label={mapLabel} />
-      <div className="mt-3 flex gap-4 text-[10px] text-slate-500"><span>{copy("copy_bbf0b0b5e5df")}</span><span className="text-amber-700">{copy("copy_8ee132327af2")}</span><span className="text-blue-700">{copy("copy_f30c5b09f4f0")}</span></div>
+      <div className="mb-4"><h2 className="m-0 text-base font-bold text-slate-900">{water ? copy("copy_a057083f0c39") : copy("copy_10811357280f")}</h2><p className="mb-0 mt-1 text-[10px] text-slate-500">Published notices with saved location coordinates.</p></div>
+      {errors.advisories ? <SectionUnavailable title="Map locations" message={errors.advisories} /> : <GoogleMap mode="display" announcements={mapAnnouncements(advisories)} height={360} label={water ? "Water advisory locations" : "Utility advisory locations"} />}
     </article>
-    {water && <PressureZones readings={network} />}
-    <article className="rounded-xl border border-slate-200 bg-white p-5"><div className="mb-4"><h2 className="m-0 text-base font-bold text-slate-900">{copy("copy_978de5ad70fd")}</h2><p className="mb-0 mt-1 text-[10px] text-slate-500">{copy("copy_bee37faf7a58")}</p></div><div className="grid gap-3 sm:grid-cols-2">{advisories.slice(0, 4).map(item => <DataCard key={item.id} item={item} page="incidents" />)}{advisories.length === 0 && <Empty message={copy("copy_f4aec847eb06")} />}</div></article>
+    {water && <PressureZones readings={network} unavailable={errors["network readings"]} />}
+    <article className="rounded-xl border border-slate-200 bg-white p-5"><div className="mb-4"><h2 className="m-0 text-base font-bold text-slate-900">{copy("copy_978de5ad70fd")}</h2><p className="mb-0 mt-1 text-[10px] text-slate-500">{copy("copy_bee37faf7a58")}</p></div><div className="grid gap-3 sm:grid-cols-2">{errors.advisories ? <SectionUnavailable title="Advisories" message={errors.advisories} /> : advisories.slice(0, 4).map(item => <DataCard key={item.id} item={item} page="incidents" />)}{!errors.advisories && advisories.length === 0 && <Empty message={copy("copy_f4aec847eb06")} />}</div></article>
   </div>;
 }
 
-function Services({ advisories }: { advisories: Advisory[] }) {
-  const services = requiredSetting(settingsFor("resident").services, "resident.services");
-  return <div className="space-y-3">{services.map((service, index) => {
-    const hasAdvisory = advisories.some(item => item.utility === service.name && item.status !== "Resolved");
-    return <article key={service.name} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-5"><div className="flex items-center gap-3"><span className={`grid h-10 w-10 place-items-center rounded-lg ${index === 0 ? "bg-blue-50 text-blue-700" : "bg-cyan-50 text-cyan-800"}`}><Icon name={service.icon} /></span><div><strong className="block text-sm text-slate-800">{service.name}</strong><span className="text-[10px] text-slate-500">{service.description}</span></div></div><span className={`rounded-full px-2 py-1 text-[9px] font-bold ${hasAdvisory ? "bg-amber-50 text-amber-800" : "bg-emerald-50 text-emerald-800"}`}>{hasAdvisory ? service.advisoryStatus : service.operationalStatus}</span></article>;
-  })}<p className="rounded-lg bg-amber-50 p-3 text-[10px] leading-5 text-amber-900">{copy("copy_f437429d2649")}</p></div>;
+function Services({ advisories, unavailable }: { advisories: Advisory[]; unavailable?: string }) {
+  if (unavailable) return <SectionUnavailable title="Utility services" message={unavailable} />;
+  const utilities = [...new Set(advisories.map(item => item.utility).filter(Boolean))].sort();
+  return <div className="space-y-3">{utilities.length
+    ? utilities.map(utility => {
+      const activeCount = advisories.filter(item => item.utility === utility && !["Resolved", "Cancelled"].includes(item.status)).length;
+      return <article key={utility} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-5"><div><strong className="block text-sm text-slate-800">{utility}</strong><span className="text-[10px] text-slate-500">Based on utility announcements available to your account.</span></div><span className="rounded-full bg-slate-100 px-2 py-1 text-[9px] font-bold text-slate-700">{activeCount ? `${activeCount} active notices` : "No active notices"}</span></article>;
+    })
+    : <Empty message="No utility announcement records are available yet." />}</div>;
 }
 
-function VirtualInbox({ messages, onRead }: { messages: SMSRecord[]; onRead: (message: SMSRecord) => void }) {
+function VirtualInbox({ messages, unavailable, onRead }: { messages: SMSRecord[]; unavailable?: string; onRead: (message: SMSRecord) => void }) {
   return <section className="space-y-3">
-    <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">{copy("copy_c731f7df8727")}</p>
-    {messages.length === 0 ? <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500">{copy("copy_5b2101616c26")}</div> :
+    <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">{copy("smsInboxDisclaimer")}</p>
+    {unavailable ? <SectionUnavailable title="Inbox" message={unavailable} /> : messages.length === 0 ? <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500">{copy("smsInboxEmpty")}</div> :
       messages.map(message => <article key={message.id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <div><span className="rounded-full bg-violet-50 px-2 py-1 text-[9px] font-bold text-violet-800">{copy("copy_bca3048d4062")}</span><h2 className="mb-1 mt-3 text-sm font-bold text-slate-900">{message.utility} · {message.reference}</h2><SmsMessageText body={message.body} /></div>
-          <div className="text-right"><span className={`text-[9px] font-bold ${message.read ? "text-slate-400" : "text-rose-700"}`}>{message.read ? copy("copy_9b9a8d05a7ec") : copy("copy_1b9f384c1436")}</span><p className="mt-2 text-[9px] text-slate-400">{message.recipient} · {message.phoneNumber}</p><time className="text-[9px] text-slate-400">{formatResidentDateTime(message.createdAt)}</time></div>
+          <div><span className="rounded-full bg-violet-50 px-2 py-1 text-[9px] font-bold text-violet-800">{copy("smsInboxStatusSimulated")}</span><h2 className="mb-1 mt-3 text-sm font-bold text-slate-900">{message.utility} · {message.reference}</h2><SmsMessageText body={message.body} /></div>
+          <div className="text-right"><span className={`text-[9px] font-bold ${message.read ? "text-slate-400" : "text-rose-700"}`}>{message.read ? copy("smsInboxStatusRead") : copy("smsInboxStatusUnread")}</span><p className="mt-2 text-[9px] text-slate-400">{message.recipient} · {message.phoneNumber}</p><time className="text-[9px] text-slate-400">{formatResidentDateTime(message.createdAt)}</time></div>
         </div>
-        {!message.read && <button type="button" onClick={() => onRead(message)} className="mt-3 rounded-md border border-slate-200 px-3 py-1.5 text-[9px] font-semibold text-slate-600 hover:bg-slate-50">{copy("copy_50c8b81faf51")}</button>}
+        {!message.read && <button type="button" onClick={() => onRead(message)} className="mt-3 rounded-md border border-slate-200 px-3 py-1.5 text-[9px] font-semibold text-slate-600 hover:bg-slate-50">{copy("smsInboxMarkRead")}</button>}
       </article>)}
   </section>;
 }
@@ -2116,8 +2405,8 @@ function RecordModal({ portal, kind, onClose, onSubmit }: { portal: Portal; kind
   const water = portal === "water";
   const title = settingsFor(portal).modalTitles[kind];
   return <div className="fixed inset-0 z-40 grid place-items-center bg-slate-950/50 p-4" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><section role="dialog" aria-modal="true" className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl"><div className="mb-5 flex items-start justify-between"><div><p className="mb-2 text-[9px] font-extrabold tracking-[.15em] text-[var(--brand)]">{settingsFor(portal).label.toUpperCase()} {copy("copy_5493ff8e9397")}</p><h2 className="m-0 text-xl font-extrabold text-slate-900">{title}</h2></div><button onClick={onClose} className="rounded-lg bg-slate-100 p-2 text-slate-500" aria-label={copy("copy_7d9eb7acb13e")}><Icon name="close" /></button></div><form onSubmit={onSubmit} className="space-y-4">
-    <label className="block text-xs font-bold text-slate-700">{kind === "work" ? copy("copy_713b2d01699a") : copy("copy_2b7f97151f81")}<input name="title" required placeholder={kind === "work" ? water ? copy("copy_d210615060af") : copy("copy_be1568cc2343") : water ? copy("copy_f61939b4ec8b") : copy("copy_14a302e7d4cb")} className="mt-2 block w-full rounded-lg border border-slate-200 p-3 text-sm font-normal" /></label>
-    <label className="block text-xs font-bold text-slate-700">{copy("copy_4dfc9891f0d9")}<input name="area" required placeholder={copy("copy_d747a0681306")} className="mt-2 block w-full rounded-lg border border-slate-200 p-3 text-sm font-normal" /></label>
+    <label className="block text-xs font-bold text-slate-700">{kind === "work" ? copy("copy_713b2d01699a") : copy("copy_2b7f97151f81")}<input name="title" required placeholder={kind === "work" ? "Enter a work order title" : "Summarize the service update"} className="mt-2 block w-full rounded-lg border border-slate-200 p-3 text-sm font-normal" /></label>
+    <label className="block text-xs font-bold text-slate-700">{copy("copy_4dfc9891f0d9")}<ServiceAreaDropdown name="area" required className="mt-2 block w-full rounded-lg border border-slate-200 p-3 text-sm font-normal" /></label>
     <label className="block text-xs font-bold text-slate-700">{kind === "work" ? copy("copy_7e4c74552701") : copy("copy_3d8e9e6f5e5f")}<textarea name={kind === "work" ? "description" : "details"} required rows={4} placeholder={copy("copy_ef9e65b78190")} className="mt-2 block w-full rounded-lg border border-slate-200 p-3 text-sm font-normal" /></label>
     {kind === "work" && <div className="grid grid-cols-2 gap-3"><label className="block text-xs font-bold text-slate-700">{copy("copy_e4bb9f1ece9a")}<input name="startsAt" type="datetime-local" required className="mt-2 block w-full rounded-lg border border-slate-200 p-2.5 text-xs font-normal" /></label><label className="block text-xs font-bold text-slate-700">{copy("copy_f4db1e48476f")}<input name="endsAt" type="datetime-local" required className="mt-2 block w-full rounded-lg border border-slate-200 p-2.5 text-xs font-normal" /></label></div>}
     <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" onClick={onClose} className="rounded-lg border border-slate-200 px-4 py-2.5 text-xs font-bold text-slate-600">{copy("copy_19766ed6ccb2")}</button><button className="rounded-lg bg-[var(--brand)] px-4 py-2.5 text-xs font-bold text-white">{kind === "advisory" ? copy("copy_3e2f45d85a26") : copy("copy_a6de1b1266b1")}</button></div>
@@ -2128,15 +2417,80 @@ function PortalApp({ portal }: { portal: Portal }) {
   return <App portal={portal} />;
 }
 
+class PortalErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error("Portal rendering failed.", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.error) {
+      return <main className="min-h-screen p-6 text-slate-900">
+        <section role="alert" className="mx-auto mt-10 max-w-xl rounded-xl border border-rose-300 bg-rose-50 p-5">
+          <h1 className="m-0 text-lg font-bold">The portal could not be displayed.</h1>
+          <p className="mt-2 text-sm">{this.state.error.message}</p>
+          <button type="button" onClick={() => location.reload()} className="mt-3 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white">
+            Reload portal
+          </button>
+        </section>
+      </main>;
+    }
+    return this.props.children;
+  }
+}
+
 export function mountPortal(portal: Portal) {
   const element = document.getElementById("root");
   if (!element) throw new Error("Missing #root mount element");
   const root = createRoot(element);
+  root.render(<main role="status">Loading portal configuration...</main>);
   try {
-    getSupabase();
-    root.render(<PortalApp portal={portal} />);
+    void (async () => {
+      try {
+        const response = await fetch(`${apiBaseUrl(portal)}/content`);
+        const content: unknown = await response.json();
+        if (!response.ok) {
+          const message = content && typeof content === "object" && "error" in content && typeof content.error === "string"
+            ? content.error
+            : `Could not load portal configuration (HTTP ${response.status}).`;
+          throw new Error(message);
+        }
+        if (!isPortalContent(content)) throw new Error("The API returned invalid portal configuration.");
+        portalContent = content;
+        getSupabase();
+        root.render(<PortalErrorBoundary><PortalApp portal={portal} /></PortalErrorBoundary>);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Could not initialize the portal.";
+        root.render(<main role="alert">{message}</main>);
+      }
+    })();
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not initialize Supabase.";
+    const message = error instanceof Error ? error.message : "Could not initialize the portal.";
     root.render(<main role="alert">{message}</main>);
   }
+}
+
+function isPortalContent(value: unknown): value is PortalContent {
+  if (!value || typeof value !== "object") return false;
+  const content = value as Record<string, unknown>;
+  if (!content.copy || typeof content.copy !== "object" || !content.settings || typeof content.settings !== "object") return false;
+  const copyEntries = Object.values(content.copy);
+  if (!copyEntries.every(entry => typeof entry === "string")) return false;
+  const settings = content.settings as Record<string, unknown>;
+  return (["resident", "cepalco", "water"] as const).every(portal => {
+    const setting = settings[portal];
+    if (!setting || typeof setting !== "object") return false;
+    const record = setting as Record<string, unknown>;
+    return typeof record.label === "string" &&
+      typeof record.brand === "string" &&
+      Array.isArray(record.navigation) &&
+      !!record.pageTitles && typeof record.pageTitles === "object" &&
+      !!record.pageDescriptions && typeof record.pageDescriptions === "object" &&
+      !!record.modalTitles && typeof record.modalTitles === "object";
+  });
 }

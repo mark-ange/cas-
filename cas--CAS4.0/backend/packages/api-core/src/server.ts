@@ -17,7 +17,7 @@ import {
   safeGmailError,
   sendGmailMessage,
 } from "./gmail.js";
-import { publishAnnouncementToSocial, socialConfiguration, type SocialDeliverySummary, type SocialPlatform } from "./social.js";
+import { publishAnnouncementToSocial, resolveInstagramPermalink, socialConfiguration, type SocialDeliverySummary, type SocialPlatform } from "./social.js";
 
 type Portal = "resident" | "cepalco" | "water";
 type Locals = { actor?: Actor };
@@ -29,23 +29,45 @@ type ResidentProfile = {
   role: "resident";
   utility: null;
   phone_number: string | null;
-  address: string | null;
-  barangay: string | null;
-  purok: string | null;
-  district: string | null;
-  city: string | null;
-  postal_code: string | null;
-  profile_image: string | null;
   sms_alerts: boolean;
-  notify_maintenance: boolean;
-  notify_email_digest: boolean;
-  immediate_email_alerts: boolean;
-  terms_accepted_at: string | null;
 };
 type EmailRecipient = Pick<ResidentProfile, "name" | "email">;
 const utilities: Record<Exclude<Portal, "resident">, string> = { cepalco: "CEPALCO", water: "Water District" };
 const notificationChannels = ["facebook", "instagram", "gmail", "sms"] as const;
 type NotificationChannel = typeof notificationChannels[number];
+const MAX_ANNOUNCEMENT_IMAGES = 10;
+
+function parseAnnouncementImages(value: unknown): string[] {
+  if (value === undefined || value === null || value === "") return [];
+  const values = Array.isArray(value) ? value : [value];
+  if (values.length > MAX_ANNOUNCEMENT_IMAGES) {
+    throw new Error(`Choose no more than ${MAX_ANNOUNCEMENT_IMAGES} announcement images.`);
+  }
+  return values.map((image, index) => {
+    const parsed = parseGmailImageAttachment(image);
+    if (!parsed) throw new Error(`Announcement image ${index + 1} is empty.`);
+    return `data:${parsed.mimeType};base64,${parsed.content.toString("base64")}`;
+  });
+}
+
+function readStoredAnnouncementImages(value: string | null): string[] {
+  if (!value) return [];
+  if (value.startsWith("[")) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      throw new Error("Stored announcement images are invalid.");
+    }
+    return parseAnnouncementImages(parsed);
+  }
+  return parseAnnouncementImages(value);
+}
+
+function serializeAnnouncementImages(images: string[]): string | null {
+  if (images.length === 0) return null;
+  return images.length === 1 ? images[0] : JSON.stringify(images);
+}
 
 function supabaseAdmin() {
   const url = process.env.SUPABASE_URL?.trim();
@@ -64,26 +86,18 @@ async function syncResidentProfiles(supabase: ReturnType<typeof supabaseAdmin>) 
   for (const resident of residents ?? []) {
     const existing = database.prepare("SELECT id FROM users WHERE lower(email) = lower(?) AND role = 'resident' LIMIT 1")
       .get(resident.email) as { id: number } | undefined;
-    const columns = [
-      resident.name, resident.email, resident.phone_number, resident.address, resident.barangay, resident.purok,
-      resident.district, resident.city, resident.postal_code, resident.profile_image,
-      Number(resident.sms_alerts), Number(resident.notify_maintenance),
-      Number(resident.notify_email_digest), Number(resident.immediate_email_alerts), resident.terms_accepted_at,
-    ];
     if (existing) {
       database.prepare(`
-        UPDATE users SET name=?,email=?,phone_number=?,address=?,barangay=?,purok=?,district=?,city=?,
-          postal_code=?,profile_image=?,sms_alerts=?,notify_maintenance=?,notify_email_digest=?,
-          immediate_email_alerts=?,terms_accepted_at=? WHERE id=?
-      `).run(...columns, existing.id);
+        UPDATE users SET name=?,email=?,phone_number=?,sms_alerts=? WHERE id=?
+      `).run(resident.name, resident.email, resident.phone_number, Number(resident.sms_alerts), existing.id);
     } else {
       database.prepare(`
-        INSERT INTO users
-          (name,email,password_hash,role,utility,phone_number,address,barangay,purok,district,city,
-           postal_code,profile_image,sms_alerts,notify_maintenance,notify_email_digest,
-           immediate_email_alerts,terms_accepted_at)
-        VALUES (?,?,?,'resident',NULL,?,?,?,?,?,?,?,?,?,?,?,?,?)
-      `).run(resident.name, resident.email, hashPassword(randomBytes(32).toString("hex")), ...columns.slice(2));
+        INSERT INTO users (name,email,password_hash,role,utility,phone_number,sms_alerts)
+        VALUES (?,?,?,'resident',NULL,?,?)
+      `).run(
+        resident.name, resident.email, hashPassword(randomBytes(32).toString("hex")),
+        resident.phone_number, Number(resident.sms_alerts),
+      );
     }
   }
   return residents ?? [];
@@ -94,7 +108,7 @@ async function residentProfilesFromSupabase(supabase: ReturnType<typeof supabase
   const pageSize = 1000;
   for (let offset = 0; ; offset += pageSize) {
     const { data, error } = await supabase.from("profiles")
-      .select("id,name,email,role,utility,phone_number,address,barangay,purok,district,city,postal_code,profile_image,sms_alerts,notify_maintenance,notify_email_digest,immediate_email_alerts,terms_accepted_at")
+      .select("id,name,email,role,utility,phone_number,sms_alerts")
       .eq("role", "resident")
       .order("id")
       .range(offset, offset + pageSize - 1);
@@ -142,14 +156,10 @@ function parseOptionalDateTime(value: unknown, name: string): string | null {
 const residentBarangays = portalSettings.resident.barangays ?? [];
 const pilotPuroks = new Set(Array.from({ length: 10 }, (_, index) => String(index + 1)));
 
-function parseAffectedArea(value: unknown): string {
+function parseAnnouncementArea(value: unknown): string {
   const area = required(value, "Affected service area");
-  const match = area.match(/^(.+?)(?:,\s*Purok\s+(\d+))?$/i);
-  const barangay = residentBarangays.find(item => item.toLocaleLowerCase() === match?.[1]?.trim().toLocaleLowerCase());
-  if (!match || !barangay || (match[2] && !pilotPuroks.has(match[2]))) {
-    throw new Error("Choose a barangay and an available purok from the list.");
-  }
-  return `${barangay}${match[2] ? `, Purok ${match[2]}` : ""}`;
+  if (area.length > 160) throw new Error("Affected service area must be 160 characters or fewer.");
+  return area;
 }
 
 function normalizeResidentBarangay(value: unknown): string {
@@ -166,29 +176,38 @@ function normalizeResidentPurok(value: unknown): string | null {
   return purok;
 }
 
-function matchesResidentTarget(area: string, resident: { barangay?: string | null; purok?: string | null; address?: string | null }): boolean {
-  const match = area.match(/^(.+?)(?:,\s*Purok\s+(\d+))?$/i);
-  const targetBarangay = residentBarangays.find(item => item.toLocaleLowerCase() === match?.[1]?.trim().toLocaleLowerCase());
-  if (!match || !targetBarangay || (match[2] && !pilotPuroks.has(match[2]))) return false;
-  const barangay = resident.barangay?.trim();
-  if (!barangay || targetBarangay.toLocaleLowerCase() !== barangay.toLocaleLowerCase()) return false;
-  if (!match[2]) return true;
-  const residentPurok = resident.purok?.trim() || (resident.address ?? "").match(/\bpurok\s+(\d+)\b/i)?.[1];
-  return residentPurok === match[2];
-}
-
-function createSimulatedSms(advisoryId: number, area: string): number {
+function createSimulatedSms(advisoryId: number): number {
   const recipients = database.prepare(`
-    SELECT id, address, barangay, purok FROM users
-    WHERE role = 'resident' AND (sms_alerts = 1 OR sms_alerts IS NULL)
-      AND length(trim(coalesce(phone_number, ''))) > 0
-  `).all() as Array<{ id: number; address: string | null; barangay: string | null; purok: string | null }>;
+    SELECT id FROM users WHERE role = 'resident'
+  `).all() as Array<{ id: number }>;
   const insert = database.prepare("INSERT OR IGNORE INTO sms_deliveries (advisory_id, resident_id) VALUES (?, ?)");
   let queued = 0;
   for (const recipient of recipients) {
-    if (matchesResidentTarget(area, recipient)) queued += Number(insert.run(advisoryId, recipient.id).changes);
+    queued += Number(insert.run(advisoryId, recipient.id).changes);
   }
   return queued;
+}
+
+function formatAdvisoryDetails(advisory: {
+  type?: string;
+  location?: string;
+  serviceStatus?: string;
+  area: string;
+  serviceStartsAt?: string | null;
+  estimatedRestorationAt?: string | null;
+  provider?: string;
+  details: string;
+}): string {
+  return [
+    `Type of Service: ${advisory.type || "Service advisory"}`,
+    advisory.location ? `Location: ${advisory.location}` : null,
+    `Status: ${advisory.serviceStatus || "Service interruption"}`,
+    `Affecting Area: ${advisory.area}`,
+    advisory.serviceStartsAt ? `Scheduled Start: ${advisory.serviceStartsAt}` : null,
+    advisory.estimatedRestorationAt ? `Estimated Restoration: ${advisory.estimatedRestorationAt}` : null,
+    advisory.provider ? `Provider: ${advisory.provider}` : null,
+    `Description: ${advisory.details}`,
+  ].filter((line): line is string => line !== null).join("\n");
 }
 
 function recordSocialPosts(advisoryId: number, summary: SocialDeliverySummary | null): void {
@@ -198,7 +217,7 @@ function recordSocialPosts(advisoryId: number, summary: SocialDeliverySummary | 
     VALUES (?, ?, ?, ?)
     ON CONFLICT(advisory_id, platform) DO UPDATE SET
       post_id = excluded.post_id,
-      permalink_url = excluded.permalink_url,
+      permalink_url = COALESCE(excluded.permalink_url, social_posts.permalink_url),
       published_at = CURRENT_TIMESTAMP
   `);
   for (const post of summary.platforms) {
@@ -232,26 +251,33 @@ async function publishSelectedChannels(
     id: number;
     reference: string;
     title: string;
+    type?: string;
+    location?: string;
+    serviceStatus?: string;
     area: string;
+    serviceStartsAt?: string | null;
+    estimatedRestorationAt?: string | null;
+    provider?: string;
     details: string;
-    imageDataUrl: string | null;
+    imageDataUrls: string[];
   },
   channels: NotificationChannel[],
   recipientProfiles?: EmailRecipient[],
 ) {
-  if (!advisory.imageDataUrl && channels.some(channel => ["facebook", "instagram", "gmail"].includes(channel))) {
+  if (advisory.imageDataUrls.length === 0 && channels.some(channel => ["facebook", "instagram", "gmail"].includes(channel))) {
     throw new Error("Add an announcement image before publishing to Facebook, Instagram, or Gmail.");
   }
+  const noticeDetails = formatAdvisoryDetails(advisory);
   const socialChannels = channels.filter((channel): channel is SocialPlatform => channel === "facebook" || channel === "instagram");
   const socialDelivery = socialChannels.length
-    ? await publishAnnouncementToSocial(portal, utility, advisory.id, advisory.reference, advisory.title, advisory.area, advisory.details, advisory.imageDataUrl, socialChannels)
+    ? await publishAnnouncementToSocial(portal, utility, advisory.id, advisory.reference, advisory.title, advisory.area, noticeDetails, advisory.imageDataUrls, socialChannels)
     : null;
   recordSocialPosts(advisory.id, socialDelivery);
   const socialLinks = socialLinksForAdvisory(advisory.id);
   const emailDelivery = channels.includes("gmail")
-    ? await deliverAdvisoryEmails(portal, utility, advisory.id, advisory.reference, advisory.title, advisory.area, advisory.details, advisory.imageDataUrl, false, socialLinks, recipientProfiles)
+    ? await deliverAdvisoryEmails(portal, utility, advisory.id, advisory.reference, advisory.title, advisory.area, noticeDetails, advisory.imageDataUrls, false, socialLinks, recipientProfiles)
     : null;
-  const smsQueued = channels.includes("sms") ? createSimulatedSms(advisory.id, advisory.area) : 0;
+  const smsQueued = createSimulatedSms(advisory.id);
   return { emailDelivery, socialDelivery, socialLinks: socialLinksForAdvisory(advisory.id), smsQueued };
 }
 
@@ -299,7 +325,21 @@ function decorateRows<T extends Row>(rows: T[]): T[] {
       const outputKey = key.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
       decorated[outputKey] = value;
     }
+
     return decorated as T;
+  });
+}
+
+function decorateAdvisoryRows(rows: Row[]): Row[] {
+  return decorateRows(rows).map(row => {
+    const imageCount = Math.max(0, Math.min(MAX_ANNOUNCEMENT_IMAGES, Number(row.imageCount) || 0));
+    const id = Number(row.id);
+    const firstImage = typeof row.imageUrl === "string" ? row.imageUrl : null;
+    return {
+      ...row,
+      imageUrls: Array.from({ length: imageCount }, (_, index) =>
+        index === 0 ? firstImage : `/advisories/${id}/images/${index}`),
+    };
   });
 }
 
@@ -321,31 +361,44 @@ export function createApi(portal: Portal) {
     },
     allowedHeaders: ["Content-Type", "Authorization"],
   }));
-  app.use(express.json({ limit: "2mb" }));
+  app.use(express.json({ limit: "16mb" }));
   app.get("/health", (_req, res) => res.json({ ok: true, portal, service: "Community Alert System API" }));
   app.get("/content", (_req, res) => {
     const rows = database.prepare("SELECT content_key, content_value FROM ui_copy ORDER BY content_key").all() as Array<{ content_key: string; content_value: string }>;
-    const settings = database.prepare("SELECT settings_json FROM portal_settings WHERE portal = ?").get(portal) as { settings_json: string } | undefined;
-    if (!settings) return res.status(500).json({ error: `Portal content for ${portal} is unavailable.` });
-    return res.json({ copy: Object.fromEntries(rows.map(row => [row.content_key, row.content_value])), settings: JSON.parse(settings.settings_json) });
+    const settingsRows = database.prepare("SELECT portal, settings_json FROM portal_settings").all() as Array<{ portal: string; settings_json: string }>;
+    const settings = Object.fromEntries(settingsRows.map(row => [row.portal, JSON.parse(row.settings_json)]));
+    if (!settings[portal]) return res.status(500).json({ error: `Portal content for ${portal} is unavailable.` });
+    return res.json({ copy: Object.fromEntries(rows.map(row => [row.content_key, row.content_value])), settings });
   });
-  app.get("/advisories/:id/image", (req, res) => {
+  const serveAdvisoryImage = (req: Request, res: Response, imageIndex: number) => {
     const advisory = database.prepare(`
       SELECT image_data_url FROM advisories
       WHERE id = ? AND publication_status IN ('published', 'publishing')
     `).get(Number(req.params.id)) as { image_data_url: string | null } | undefined;
     if (!advisory?.image_data_url) return res.status(404).json({ error: "Announcement image not found." });
-    const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/.exec(advisory.image_data_url);
+    const imageDataUrl = readStoredAnnouncementImages(advisory.image_data_url)[imageIndex];
+    if (!imageDataUrl) return res.status(404).json({ error: "Announcement image is not available." });
+    const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/.exec(imageDataUrl);
     if (!match) return res.status(404).json({ error: "Announcement image is not available." });
     res.setHeader("Cache-Control", "public, max-age=3600");
     return res.type(match[1]).send(Buffer.from(match[2], "base64"));
+  };
+  app.get("/advisories/:id/image", (req, res) => serveAdvisoryImage(req, res, 0));
+  app.get("/advisories/:id/images/:index", (req, res) => {
+    const index = Number(req.params.index);
+    if (!Number.isInteger(index) || index < 0 || index >= MAX_ANNOUNCEMENT_IMAGES) {
+      return res.status(404).json({ error: "Announcement image is not available." });
+    }
+    return serveAdvisoryImage(req, res, index);
   });
   if (portal === "resident") {
     app.get("/inbox", authenticate("resident"), (_req, res: Response<unknown, Locals>) => {
       const rows = database.prepare(`
         SELECT deliveries.id, users.id AS recipient_id, users.name AS recipient,
           users.phone_number, advisories.utility, advisories.reference, advisories.title,
-          advisories.area, deliveries.created_at, deliveries.read_at,
+          advisories.type, advisories.location, advisories.service_status, advisories.area,
+          advisories.provider, advisories.service_starts_at, advisories.estimated_restoration_at,
+          advisories.details, deliveries.created_at, deliveries.read_at,
           (SELECT permalink_url FROM social_posts WHERE advisory_id = advisories.id AND platform = 'facebook') AS facebook_url,
           (SELECT permalink_url FROM social_posts WHERE advisory_id = advisories.id AND platform = 'instagram') AS instagram_url
         FROM sms_deliveries AS deliveries
@@ -361,7 +414,16 @@ export function createApi(portal: Portal) {
         phoneNumber: row.phone_number,
         utility: row.utility,
         reference: row.reference,
-        body: `${row.utility} advisory for ${row.area}: ${row.title}${socialLinksInMessage(row.facebook_url, row.instagram_url)}`,
+        body: `${row.utility} advisory: ${row.title}\n${formatAdvisoryDetails({
+          type: String(row.type ?? ""),
+          location: String(row.location ?? ""),
+          serviceStatus: String(row.service_status ?? ""),
+          area: String(row.area ?? ""),
+          serviceStartsAt: row.service_starts_at == null ? null : String(row.service_starts_at),
+          estimatedRestorationAt: row.estimated_restoration_at == null ? null : String(row.estimated_restoration_at),
+          provider: String(row.provider ?? ""),
+          details: String(row.details ?? ""),
+        })}${socialLinksInMessage(row.facebook_url, row.instagram_url)}`,
         createdAt: row.created_at,
         status: "Simulated",
         read: row.read_at !== null,
@@ -373,8 +435,10 @@ export function createApi(portal: Portal) {
       return Number(result.changes) ? res.json({ ok: true }) : res.status(404).json({ error: "Inbox message not found." });
     });
   } else {
-    app.get("/inbox", (_req, res) => res.status(404).json({ error: "The simulated SMS inbox is available only to residents." }));
-    app.patch("/inbox/:id/read", (_req, res) => res.status(404).json({ error: "The simulated SMS inbox is available only to residents." }));
+    app.get("/inbox", requireUtility(utilities[portal]), (_req, res) =>
+      res.status(404).json({ error: "The simulated SMS inbox is available only in the resident portal." }));
+    app.patch("/inbox/:id/read", requireUtility(utilities[portal]), (_req, res) =>
+      res.status(404).json({ error: "The simulated SMS inbox is available only in the resident portal." }));
   }
   if (portal === "resident") {
     app.get("/auth/me", authenticate("resident"), (_req, res: Response<unknown, Locals>) => res.json({ actor: publicActor(res.locals.actor!) }));
@@ -495,7 +559,7 @@ export function createApi(portal: Portal) {
         const district = typeof req.body?.district === "string" ? req.body.district.trim() : currentProfile.district ?? "";
         const city = typeof req.body?.city === "string" ? req.body.city.trim() : currentProfile.city ?? "";
         const postalCode = typeof req.body?.postalCode === "string" ? req.body.postalCode.trim() : currentProfile.postal_code ?? "";
-        const smsAlerts = typeof req.body?.smsAlerts === "boolean" ? Number(req.body.smsAlerts) : res.locals.actor!.sms_alerts ?? 1;
+        const smsAlerts = 1;
         const maintenanceAlerts = typeof req.body?.maintenanceAlerts === "boolean" ? Number(req.body.maintenanceAlerts) : res.locals.actor!.notify_maintenance ?? 1;
         const emailDigest = typeof req.body?.emailDigest === "boolean" ? Number(req.body.emailDigest) : res.locals.actor!.notify_email_digest ?? 1;
         const immediateEmailAlerts = typeof req.body?.immediateEmailAlerts === "boolean" ? Number(req.body.immediateEmailAlerts) : res.locals.actor!.immediate_email_alerts ?? 0;
@@ -554,7 +618,7 @@ export function createApi(portal: Portal) {
           return res.status(400).json({ error: "One or more registration fields are too long." });
         }
         if (req.body?.termsAccepted !== true) return res.status(400).json({ error: "Please accept the resident terms and privacy policy." });
-        const smsAlerts = req.body?.smsAlerts === false ? 0 : 1;
+        const smsAlerts = 1;
         const immediateEmailAlerts = req.body?.immediateEmailAlerts === true ? 1 : 0;
         const id = Number(database.prepare(`
           INSERT INTO users (name, email, password_hash, role, utility, phone_number, address, barangay, purok, district, city, postal_code, sms_alerts, immediate_email_alerts, terms_accepted_at)
@@ -567,15 +631,22 @@ export function createApi(portal: Portal) {
         return res.status(400).json({ error: error instanceof Error ? error.message : "Could not create account." });
       }
     });
-    app.get("/advisories", (_req, res) => res.json(decorateRows(database.prepare(`
-      SELECT advisories.id, reference, title, utility, type, area, status, details, priority,
-        service_starts_at, estimated_restoration_at, created_at, latitude, longitude,
-        scheduled_at, publication_status, channels_json,
-        (SELECT permalink_url FROM social_posts WHERE advisory_id = advisories.id AND platform = 'facebook') AS facebook_url,
-        (SELECT permalink_url FROM social_posts WHERE advisory_id = advisories.id AND platform = 'instagram') AS instagram_url,
-        CASE WHEN image_data_url IS NOT NULL THEN '/advisories/' || advisories.id || '/image' END AS image_url
-      FROM advisories WHERE publication_status = 'published' ORDER BY advisories.id DESC
-    `).all() as Row[])));
+    app.get("/advisories", (_req, res) => {
+      const rows = database.prepare(`
+        SELECT advisories.id, reference, title, utility, type, area, status, details,
+          location, service_status, provider, priority,
+          service_starts_at, estimated_restoration_at, created_at, latitude, longitude,
+          scheduled_at, publication_status, channels_json,
+          (SELECT permalink_url FROM social_posts WHERE advisory_id = advisories.id AND platform = 'facebook') AS facebook_url,
+          (SELECT permalink_url FROM social_posts WHERE advisory_id = advisories.id AND platform = 'instagram') AS instagram_url,
+          CASE WHEN image_data_url IS NOT NULL THEN '/advisories/' || advisories.id || '/image' END AS image_url,
+          CASE WHEN image_data_url IS NULL THEN 0
+            WHEN json_valid(image_data_url) AND json_type(image_data_url) = 'array' THEN json_array_length(image_data_url)
+            ELSE 1 END AS image_count
+        FROM advisories WHERE publication_status = 'published' ORDER BY advisories.id DESC
+      `).all() as Row[];
+      return res.json(decorateAdvisoryRows(rows));
+    });
     app.get("/work-orders", (_req, res) => {
       const rows = database.prepare("SELECT id, reference, title, utility, area, status, starts_at, ends_at FROM work_orders ORDER BY starts_at").all() as Row[];
       return res.json(decorateRows(rows));
@@ -598,51 +669,51 @@ export function createApi(portal: Portal) {
     });
   } else {
     const utility = utilities[portal];
-    app.get("/advisories/recipient-estimate", requireUtility(utility), async (req, res) => {
+    app.get("/advisories/recipient-estimate", requireUtility(utility), async (_req, res) => {
       try {
-        const area = parseAffectedArea(req.query.area);
-        const residents = await syncResidentProfiles(supabaseAdmin());
-        const matched = residents.filter(resident => matchesResidentTarget(area, resident));
-        const smsRecipients = matched.filter(resident => resident.sms_alerts !== false && Boolean(resident.phone_number?.trim())).length;
-        const residentsMissingBarangay = residents.filter(resident => !resident.barangay?.trim()).length;
+        const supabase = supabaseAdmin();
+        const [emailCountResult, smsCountResult] = await Promise.all([
+          supabase.from("profiles").select("id", { count: "exact", head: true }).eq("role", "resident"),
+          supabase.from("profiles").select("id", { count: "exact", head: true }).eq("role", "resident"),
+        ]);
+        if (emailCountResult.error) throw emailCountResult.error;
+        if (smsCountResult.error) throw smsCountResult.error;
+        const emailRecipients = emailCountResult.count ?? 0;
+        const smsRecipients = smsCountResult.count ?? 0;
         return res.json({
-          emailRecipients: matched.length,
+          emailRecipients,
           smsRecipients,
-          totalResidentAccounts: residents.length,
-          residentsMissingBarangay,
+          totalResidentAccounts: emailRecipients,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Could not estimate recipients.";
-        const status = message.startsWith("Affected service area") || message.startsWith("Choose a barangay")
-          ? 400
-          : 503;
-        return res.status(status).json({ error: status === 400 ? message : `Could not estimate recipients: ${message}` });
+        return res.status(503).json({ error: `Could not estimate recipients: ${message}` });
       }
     });
     app.post("/advisories/:id/deliver", requireUtility(utility), async (req, res) => {
       const supabase = supabaseAdmin();
       const advisoryId = Number(req.params.id);
       const { data: advisory, error: advisoryError } = await supabase.from("advisories")
-        .select("id,reference,title,utility,type,area,status,details,priority,service_starts_at,estimated_restoration_at,image_data_url,latitude,longitude,scheduled_at,publication_status,channels")
+        .select("id,reference,title,utility,type,area,status,details,location,service_status,provider,priority,service_starts_at,estimated_restoration_at,image_data_url,latitude,longitude,scheduled_at,publication_status,channels")
         .eq("id", advisoryId).eq("utility", utility).single();
       if (advisoryError || !advisory) return res.status(404).json({ error: "Supabase advisory not found." });
       try {
         const channels = parseAnnouncementChannels(advisory.channels);
-        const area = parseAffectedArea(advisory.area);
-        if (!advisory.image_data_url && channels.some(channel => ["facebook", "instagram", "gmail"].includes(channel))) {
+        const area = parseAnnouncementArea(advisory.area);
+        const imageDataUrls = readStoredAnnouncementImages(advisory.image_data_url);
+        if (imageDataUrls.length === 0 && channels.some(channel => ["facebook", "instagram", "gmail"].includes(channel))) {
           return res.status(400).json({ error: "Add an announcement image before publishing to Facebook, Instagram, or Gmail." });
         }
-        const residents = await syncResidentProfiles(supabase);
-
         const localAdvisoryId = (database.prepare(`
           INSERT INTO advisories
-            (reference,title,utility,type,area,status,details,priority,service_starts_at,
+            (reference,title,utility,type,area,status,details,location,service_status,provider,priority,service_starts_at,
              estimated_restoration_at,image_data_url,latitude,longitude,scheduled_at,
              publication_status,channels_json)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(reference) DO UPDATE SET
             title=excluded.title, utility=excluded.utility, type=excluded.type, area=excluded.area,
-            status=excluded.status, details=excluded.details, priority=excluded.priority,
+            status=excluded.status, details=excluded.details, location=excluded.location,
+            service_status=excluded.service_status, provider=excluded.provider, priority=excluded.priority,
             service_starts_at=excluded.service_starts_at,
             estimated_restoration_at=excluded.estimated_restoration_at,
             image_data_url=excluded.image_data_url, latitude=excluded.latitude, longitude=excluded.longitude,
@@ -651,7 +722,8 @@ export function createApi(portal: Portal) {
           RETURNING id
         `).get(
           advisory.reference, advisory.title, advisory.utility, advisory.type, area,
-          advisory.status, advisory.details, advisory.priority, advisory.service_starts_at,
+          advisory.status, advisory.details, advisory.location, advisory.service_status,
+          advisory.provider, advisory.priority, advisory.service_starts_at,
           advisory.estimated_restoration_at, advisory.image_data_url, advisory.latitude,
           advisory.longitude, advisory.scheduled_at, advisory.publication_status,
           JSON.stringify(channels),
@@ -661,15 +733,15 @@ export function createApi(portal: Portal) {
         // The utility-specific worker will deliver them when their schedule becomes due.
         if (advisory.publication_status === "scheduled") return res.json({ scheduled: true });
 
-        const targetResidents = residents.filter(resident => matchesResidentTarget(area, resident));
+        const residents = await syncResidentProfiles(supabase);
         const delivery = await publishSelectedChannels(portal, utility, {
           id: localAdvisoryId,
           reference: advisory.reference,
           title: advisory.title,
           area,
           details: advisory.details,
-          imageDataUrl: advisory.image_data_url,
-        }, channels, targetResidents);
+          imageDataUrls,
+        }, channels, residents);
 
         const localEmailRows = database.prepare(`
           SELECT users.email, deliveries.status, deliveries.error_message,
@@ -714,18 +786,13 @@ export function createApi(portal: Portal) {
           if (error) throw error;
         }
 
-        if (advisory.channels.includes("sms")) {
-          // The simulated SMS channel must use the same area-targeted audience
-          // as the preview estimate and the local notification records.
-          const recipients = targetResidents.filter(profile => profile.role === "resident" &&
-            profile.sms_alerts === true && Boolean(profile.phone_number?.trim()));
-          if (recipients.length) {
-            const { error } = await supabase.from("sms_deliveries").upsert(
-              recipients.map(profile => ({ advisory_id: advisory.id, resident_id: profile.id })),
-              { onConflict: "advisory_id,resident_id", ignoreDuplicates: true },
-            );
-            if (error) throw error;
-          }
+        const recipients = residents.filter(profile => profile.role === "resident");
+        if (recipients.length) {
+          const { error } = await supabase.from("sms_deliveries").upsert(
+            recipients.map(profile => ({ advisory_id: advisory.id, resident_id: profile.id })),
+            { onConflict: "advisory_id,resident_id", ignoreDuplicates: true },
+          );
+          if (error) throw error;
         }
         return res.json(delivery);
       } catch (error) {
@@ -735,32 +802,47 @@ export function createApi(portal: Portal) {
     });
     app.get("/advisories", requireUtility(utility), (_req, res) => {
       const rows = database.prepare(`
-        SELECT advisories.id, reference, title, utility, type, area, status, details, priority,
+        SELECT advisories.id, reference, title, utility, type, area, status, details,
+          location, service_status, provider, priority,
           service_starts_at, estimated_restoration_at, created_at, latitude, longitude,
           scheduled_at, publication_status, channels_json,
           (SELECT permalink_url FROM social_posts WHERE advisory_id = advisories.id AND platform = 'facebook') AS facebook_url,
           (SELECT permalink_url FROM social_posts WHERE advisory_id = advisories.id AND platform = 'instagram') AS instagram_url,
-          CASE WHEN image_data_url IS NOT NULL THEN '/advisories/' || advisories.id || '/image' END AS image_url
+          CASE WHEN image_data_url IS NOT NULL THEN '/advisories/' || advisories.id || '/image' END AS image_url,
+          CASE WHEN image_data_url IS NULL THEN 0
+            WHEN json_valid(image_data_url) AND json_type(image_data_url) = 'array' THEN json_array_length(image_data_url)
+            ELSE 1 END AS image_count
         FROM advisories WHERE utility = ? ORDER BY advisories.id DESC
       `).all(utility) as Row[];
-      return res.json(decorateRows(rows));
+      return res.json(decorateAdvisoryRows(rows));
     });
     app.post("/advisories", requireUtility(utility), async (req, res) => {
       try {
         const title = required(req.body?.title, "Advisory title");
-        const area = parseAffectedArea(req.body?.area);
+        const area = parseAnnouncementArea(req.body?.area);
         const details = required(req.body?.details, "Public update");
         const type = typeof req.body?.type === "string" ? req.body.type : "Service disruption";
+        const location = typeof req.body?.location === "string" ? req.body.location.trim() : "";
+        const serviceStatus = typeof req.body?.serviceStatus === "string" ? req.body.serviceStatus.trim() : "Upcoming Maintenance Interruption";
+        const provider = typeof req.body?.provider === "string" ? req.body.provider.trim() : "";
+        const allowedServiceStatuses = ["Upcoming Maintenance Interruption", "Active Service Interruption", "Resolved", "Cancelled"];
+        if (location.length > 160 || provider.length > 120 || type.length > 80) {
+          throw new Error("Location, provider, or service type exceeds its maximum length.");
+        }
+        if (!allowedServiceStatuses.includes(serviceStatus)) {
+          throw new Error("Choose a valid service status.");
+        }
         const priority = req.body?.priority == null ? "Normal" : required(req.body.priority, "Priority");
         if (!["Emergency", "Urgent", "High", "Normal", "Critical", "Medium", "Low"].includes(priority)) {
           throw new Error("Choose a valid advisory priority.");
         }
         const serviceStartsAt = parseOptionalDateTime(req.body?.serviceStartsAt, "Advisory start");
         const estimatedRestorationAt = parseOptionalDateTime(req.body?.estimatedRestorationAt, "Estimated restoration");
-        if (serviceStartsAt && estimatedRestorationAt && new Date(estimatedRestorationAt) <= new Date(serviceStartsAt)) {
-          throw new Error("Estimated restoration must be after the advisory start.");
+        if (serviceStartsAt && estimatedRestorationAt && new Date(estimatedRestorationAt).getTime() === new Date(serviceStartsAt).getTime()) {
+          throw new Error("Advisory start and estimated restoration times cannot be the same.");
         }
-        const channels = parseAnnouncementChannels(req.body?.channels);
+        const selectedChannels = parseAnnouncementChannels(req.body?.channels);
+        const deliveryChannels = [...new Set([...selectedChannels, "sms" as const])];
         const scheduledAt = parseScheduledAt(req.body?.scheduledAt);
 
         // ADDED: Validate the optional Google Maps location. A pin must include both coordinates.
@@ -770,13 +852,9 @@ export function createApi(portal: Portal) {
           throw new Error("Select a map location so both latitude and longitude are provided.");
         }
 
-        // ADDED: Validate the optional announcement image before saving the advisory.
-        // The frontend will submit it as a data URL (JPEG, PNG, or WebP).
-        const validatedImage = parseGmailImageAttachment(req.body?.imageDataUrl ?? null);
-        const imageDataUrl = validatedImage
-          ? `data:${validatedImage.mimeType};base64,${validatedImage.content.toString("base64")}`
-          : null;
-        if (!imageDataUrl && channels.some(channel => ["facebook", "instagram", "gmail"].includes(channel))) {
+        const imageDataUrls = parseAnnouncementImages(req.body?.imageDataUrls ?? req.body?.imageDataUrl ?? null);
+        const imageDataUrl = serializeAnnouncementImages(imageDataUrls);
+        if (imageDataUrls.length === 0 && selectedChannels.some(channel => ["facebook", "instagram", "gmail"].includes(channel))) {
           throw new Error("Add an announcement image before publishing to Facebook, Instagram, or Gmail.");
         }
 
@@ -787,17 +865,21 @@ export function createApi(portal: Portal) {
         const status = scheduledAt ? "Scheduled" : "Active";
         const id = Number(database.prepare(`
           INSERT INTO advisories
-            (reference, title, utility, type, area, status, details, priority, service_starts_at, estimated_restoration_at, image_data_url, latitude, longitude, scheduled_at, publication_status, channels_json)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(reference, title, utility, type, area, status, details, priority, serviceStartsAt, estimatedRestorationAt, imageDataUrl, latitude, longitude, scheduledAt, publicationStatus, JSON.stringify(channels)).lastInsertRowid);
+            (reference, title, utility, type, area, status, details, location, service_status, provider, priority, service_starts_at, estimated_restoration_at, image_data_url, latitude, longitude, scheduled_at, publication_status, channels_json)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(reference, title, utility, type, area, status, details, location, serviceStatus, provider, priority, serviceStartsAt, estimatedRestorationAt, imageDataUrl, latitude, longitude, scheduledAt, publicationStatus, JSON.stringify(deliveryChannels)).lastInsertRowid);
 
+        if (!scheduledAt && supabaseConfigured()) {
+          await syncResidentProfiles(supabaseAdmin());
+        }
         const delivery = scheduledAt ? null : await publishSelectedChannels(portal, utility, {
-          id, reference, title, area, details, imageDataUrl,
-        }, channels);
+          id, reference, title, type, location, serviceStatus, area, serviceStartsAt,
+          estimatedRestorationAt, provider, details, imageDataUrls,
+        }, deliveryChannels);
 
         return res.status(201).json({
-          id, reference, title, utility, type, area, status, details, priority, serviceStartsAt, estimatedRestorationAt, latitude, longitude,
-          scheduledAt, publicationStatus, channels,
+          id, reference, title, utility, type, area, status, details, location, serviceStatus, provider, priority, serviceStartsAt, estimatedRestorationAt, latitude, longitude,
+          scheduledAt, publicationStatus, channels: selectedChannels,
           facebookUrl: socialLinksForAdvisory(id).find(link => link.startsWith("Facebook: "))?.slice("Facebook: ".length) ?? null,
           instagramUrl: socialLinksForAdvisory(id).find(link => link.startsWith("Instagram: "))?.slice("Instagram: ".length) ?? null,
           ...delivery,
@@ -821,7 +903,8 @@ export function createApi(portal: Portal) {
     app.post("/advisories/:id/email-delivery/retry", requireUtility(utility), async (req, res) => {
       // ADDED: Fetch the saved image too, so retrying a failed email preserves its attachment.
       const advisory = database.prepare(`
-        SELECT id, reference, title, area, details, image_data_url
+        SELECT id, reference, title, type, area, details, location, service_status, provider,
+          service_starts_at, estimated_restoration_at, image_data_url
         FROM advisories WHERE id = ? AND utility = ?
       `).get(Number(req.params.id), utility) as {
         id: number;
@@ -829,12 +912,18 @@ export function createApi(portal: Portal) {
         title: string;
         area: string;
         details: string;
+        type: string;
+        location: string;
+        service_status: string;
+        provider: string;
+        service_starts_at: string | null;
+        estimated_restoration_at: string | null;
         image_data_url: string | null;
       } | undefined;
       if (!advisory) return res.status(404).json({ error: "Advisory not found." });
       try {
         const recipientProfiles = supabaseConfigured()
-          ? (await syncResidentProfiles(supabaseAdmin())).filter(resident => matchesResidentTarget(advisory.area, resident))
+          ? await syncResidentProfiles(supabaseAdmin())
           : undefined;
         // ADDED: Pass the originally saved image before the `failedOnly` flag.
         const emailDelivery = await deliverAdvisoryEmails(
@@ -844,8 +933,17 @@ export function createApi(portal: Portal) {
           advisory.reference,
           advisory.title,
           advisory.area,
-          advisory.details,
-          advisory.image_data_url,
+          formatAdvisoryDetails({
+            type: advisory.type,
+            location: advisory.location,
+            serviceStatus: advisory.service_status,
+            area: advisory.area,
+            serviceStartsAt: advisory.service_starts_at,
+            estimatedRestorationAt: advisory.estimated_restoration_at,
+            provider: advisory.provider,
+            details: advisory.details,
+          }),
+          readStoredAnnouncementImages(advisory.image_data_url),
           true,
           socialLinksForAdvisory(advisory.id),
           recipientProfiles,
@@ -863,29 +961,102 @@ app.get("/social/status", requireUtility(utility), (_req, res) => {
 // ADDED: Publish or retry publishing an advisory to configured social media accounts.
 app.post("/advisories/:id/social-publish", requireUtility(utility), async (req, res) => {
   const advisory = database.prepare(`
-    SELECT id, reference, title, area, details, image_data_url
+    SELECT id, reference, title, type, area, details, location, service_status,
+      provider, service_starts_at, estimated_restoration_at, image_data_url
     FROM advisories WHERE id = ? AND utility = ?
   `).get(Number(req.params.id), utility) as {
     id: number;
     reference: string;
     title: string;
+    type: string;
     area: string;
     details: string;
+    location: string;
+    service_status: string;
+    provider: string;
+    service_starts_at: string | null;
+    estimated_restoration_at: string | null;
     image_data_url: string | null;
   } | undefined;
   if (!advisory) return res.status(404).json({ error: "Advisory not found." });
+  const requestedPlatforms = req.body?.platforms;
+  if (requestedPlatforms !== undefined &&
+      (!Array.isArray(requestedPlatforms) ||
+       requestedPlatforms.length === 0 ||
+       requestedPlatforms.some((platform: unknown) => platform !== "facebook" && platform !== "instagram"))) {
+    return res.status(400).json({ error: "Choose Facebook or Instagram to publish." });
+  }
+  const platforms = requestedPlatforms === undefined
+    ? ["facebook"] as SocialPlatform[]
+    : [...new Set(requestedPlatforms as SocialPlatform[])];
   try {
-    const socialDelivery = await publishAnnouncementToSocial(
-      portal,
-      utility,
-      advisory.id,
-      advisory.reference,
-      advisory.title,
-      advisory.area,
-      advisory.details,
-      advisory.image_data_url,
-    );
+    const savedInstagramPost = platforms.length === 1 && platforms[0] === "instagram"
+      ? database.prepare(`
+          SELECT post_id, permalink_url FROM social_posts
+          WHERE advisory_id = ? AND platform = 'instagram'
+        `).get(advisory.id) as { post_id: string; permalink_url: string | null } | undefined
+      : undefined;
+    const resolvedInstagramUrl = savedInstagramPost
+      ? savedInstagramPost.permalink_url ?? await resolveInstagramPermalink(portal, savedInstagramPost.post_id)
+      : null;
+    const socialDelivery: SocialDeliverySummary = savedInstagramPost
+      ? {
+          status: resolvedInstagramUrl ? "published" : "partial",
+          platforms: [{
+            platform: "instagram",
+            status: "published",
+            id: savedInstagramPost.post_id,
+            ...(resolvedInstagramUrl
+              ? { permalinkUrl: resolvedInstagramUrl }
+              : { message: "Instagram already published this post, but its link is not available yet. Try again shortly." }),
+          }],
+        }
+      : await publishAnnouncementToSocial(
+          portal,
+          utility,
+          advisory.id,
+          advisory.reference,
+          advisory.title,
+          advisory.area,
+          formatAdvisoryDetails({
+            type: advisory.type,
+            location: advisory.location,
+            serviceStatus: advisory.service_status,
+            area: advisory.area,
+            serviceStartsAt: advisory.service_starts_at,
+            estimatedRestorationAt: advisory.estimated_restoration_at,
+            provider: advisory.provider,
+            details: advisory.details,
+          }),
+          readStoredAnnouncementImages(advisory.image_data_url),
+          platforms,
+        );
     recordSocialPosts(advisory.id, socialDelivery);
+    if (supabaseConfigured()) {
+      const supabase = supabaseAdmin();
+      const { data: supabaseAdvisory, error: advisoryError } = await supabase.from("advisories")
+        .select("id").eq("reference", advisory.reference).eq("utility", utility).single();
+      if (advisoryError || !supabaseAdvisory) throw advisoryError ?? new Error("Supabase advisory not found.");
+      const posts = database.prepare(`
+        SELECT platform, post_id, permalink_url, published_at
+        FROM social_posts WHERE advisory_id = ?
+      `).all(advisory.id) as Array<{
+        platform: string;
+        post_id: string;
+        permalink_url: string | null;
+        published_at: string;
+      }>;
+      if (posts.length) {
+        const { error } = await supabase.from("social_posts").upsert(posts.map(post => ({
+          advisory_id: supabaseAdvisory.id,
+          platform: post.platform,
+          post_id: post.post_id,
+          permalink_url: post.permalink_url,
+          published_at: post.published_at,
+        })), { onConflict: "advisory_id,platform" });
+        if (error) throw error;
+      }
+    }
     return res.json({ ...socialDelivery, socialLinks: socialLinksForAdvisory(advisory.id) });
   } catch (error) {
     return res.status(500).json({ error: error instanceof Error ? error.message : "Could not publish to social media." });
@@ -895,7 +1066,11 @@ app.post("/advisories/:id/social-publish", requireUtility(utility), async (req, 
 app.patch("/advisories/:id/status", requireUtility(utility), (req, res) => {
       const status = req.body?.status;
       if (!["Scheduled", "Active", "Resolved", "Cancelled"].includes(status)) return res.status(400).json({ error: "Unsupported advisory status." });
-      const result = database.prepare("UPDATE advisories SET status = ? WHERE id = ? AND utility = ? AND publication_status = 'published'").run(status, Number(req.params.id), utility);
+      const serviceStatus = status === "Resolved" || status === "Cancelled"
+        ? status
+        : status === "Active" ? "Active Service Interruption" : null;
+      const result = database.prepare("UPDATE advisories SET status = ?, service_status = COALESCE(?, service_status) WHERE id = ? AND utility = ? AND publication_status = 'published'")
+        .run(status, serviceStatus, Number(req.params.id), utility);
       return Number(result.changes) ? res.json({ ok: true }) : res.status(404).json({ error: "Advisory not found." });
     });
     app.get("/work-orders", requireUtility(utility), (_req, res) => {
@@ -1025,7 +1200,8 @@ export function startScheduledAnnouncementWorker(portal: Exclude<Portal, "reside
     running = true;
     try {
       const due = database.prepare(`
-        SELECT id, reference, title, area, details, image_data_url, channels_json
+        SELECT id, reference, title, type, area, details, location, service_status,
+          provider, service_starts_at, estimated_restoration_at, image_data_url, channels_json
         FROM advisories
         WHERE utility = ? AND publication_status = 'scheduled'
           AND datetime(scheduled_at) <= datetime('now')
@@ -1034,8 +1210,14 @@ export function startScheduledAnnouncementWorker(portal: Exclude<Portal, "reside
         id: number;
         reference: string;
         title: string;
+        type: string;
         area: string;
         details: string;
+        location: string;
+        service_status: string;
+        provider: string;
+        service_starts_at: string | null;
+        estimated_restoration_at: string | null;
         image_data_url: string | null;
         channels_json: string;
       }>;
@@ -1060,15 +1242,21 @@ export function startScheduledAnnouncementWorker(portal: Exclude<Portal, "reside
         try {
           const channels = parseAnnouncementChannels(JSON.parse(advisory.channels_json));
           const recipientProfiles = supabaseConfigured()
-            ? (await syncResidentProfiles(supabaseAdmin())).filter(resident => matchesResidentTarget(advisory.area, resident))
+            ? await syncResidentProfiles(supabaseAdmin())
             : undefined;
           const delivery = await publishSelectedChannels(portal, utility, {
             id: advisory.id,
             reference: advisory.reference,
             title: advisory.title,
+            type: advisory.type,
+            location: advisory.location,
+            serviceStatus: advisory.service_status,
             area: advisory.area,
+            serviceStartsAt: advisory.service_starts_at,
+            estimatedRestorationAt: advisory.estimated_restoration_at,
+            provider: advisory.provider,
             details: advisory.details,
-            imageDataUrl: advisory.image_data_url,
+            imageDataUrls: readStoredAnnouncementImages(advisory.image_data_url),
           }, channels, recipientProfiles);
           await syncScheduledDeliveryToSupabase(portal, utility, advisory.reference, advisory.id);
           database.prepare(`
@@ -1262,12 +1450,12 @@ async function deliverAdvisoryEmails(
   title: string,
   area: string,
   details: string,
-  imageDataUrl: string | null = null,
+  imageDataUrls: string[] = [],
   failedOnly = false,
   socialLinks: string[] = [],
   recipientProfiles?: EmailRecipient[],
 ) {
-  if (!imageDataUrl) throw new Error("Add an announcement image before sending advisory emails.");
+  if (imageDataUrls.length === 0) throw new Error("Add an announcement image before sending advisory emails.");
   const localRecipients = recipientProfiles === undefined
     ? database.prepare(`
         SELECT users.id, users.name, users.email FROM users
@@ -1342,8 +1530,7 @@ async function deliverAdvisoryEmails(
         recipient.email,
         `${utility} advisory: ${title}`,
         `${title}\n\n${area}\n\n${details}\n\nReference: ${reference}${socialLinks.length ? `\n\nSocial post links:\n${socialLinks.join("\n")}` : ""}`,
-        // ADDED: Gmail creates a multipart email when this optional image data URL is present.
-        imageDataUrl,
+        imageDataUrls,
       );
       update.run("sent", null, "sent", advisoryId, recipient.id);
     } catch (error) {

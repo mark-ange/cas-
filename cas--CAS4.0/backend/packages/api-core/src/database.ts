@@ -37,6 +37,9 @@ database.exec(`
     status TEXT NOT NULL DEFAULT 'Monitoring',
     details TEXT NOT NULL,
     priority TEXT NOT NULL DEFAULT 'Normal',
+    location TEXT NOT NULL DEFAULT '',
+    service_status TEXT NOT NULL DEFAULT 'Upcoming Maintenance Interruption',
+    provider TEXT NOT NULL DEFAULT '',
     service_starts_at TEXT,
     estimated_restoration_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -169,6 +172,8 @@ try {
     ).map((column) => column.name)
   );
 
+  const hadServiceStatus = advisoryColumns.has("service_status");
+
   if (!advisoryColumns.has("image_data_url")) {
     database.exec(
       "ALTER TABLE advisories ADD COLUMN image_data_url TEXT"
@@ -193,12 +198,27 @@ for (const [name, definition] of [
   ["publication_status", "TEXT NOT NULL DEFAULT 'published'"],
   ["channels_json", "TEXT NOT NULL DEFAULT '[]'"],
   ["priority", "TEXT NOT NULL DEFAULT 'Normal'"],
+  ["location", "TEXT NOT NULL DEFAULT ''"],
+  ["service_status", "TEXT NOT NULL DEFAULT 'Upcoming Maintenance Interruption'"],
+  ["provider", "TEXT NOT NULL DEFAULT ''"],
   ["service_starts_at", "TEXT"],
   ["estimated_restoration_at", "TEXT"],
 ] as const) {
   if (!advisoryColumns.has(name)) {
     database.exec(`ALTER TABLE advisories ADD COLUMN ${name} ${definition}`);
   }
+}
+
+if (!hadServiceStatus) {
+  database.exec(`
+    UPDATE advisories
+    SET service_status = CASE
+      WHEN status = 'Resolved' THEN 'Resolved'
+      WHEN status = 'Cancelled' THEN 'Cancelled'
+      WHEN status = 'Scheduled' THEN 'Upcoming Maintenance Interruption'
+      ELSE 'Active Service Interruption'
+    END
+  `);
 }
 
 const oldAdvisoriesMigration = "clear-old-utility-advisories";

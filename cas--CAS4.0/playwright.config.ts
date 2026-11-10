@@ -1,5 +1,11 @@
 import { defineConfig, devices } from '@playwright/test';
 
+if (process.env.CAS_E2E_ALLOW_WRITES !== 'true') {
+  throw new Error(
+    'The browser suite can register users and create or update records. Set CAS_E2E_ALLOW_WRITES=true only when every service points to a disposable test project.',
+  );
+}
+
 export default defineConfig({
   testDir: './e2e',
   timeout: 45000,

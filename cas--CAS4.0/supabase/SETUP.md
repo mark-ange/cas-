@@ -12,7 +12,7 @@ The portals use Supabase Auth and Supabase tables for sign-in and application re
 4. Run `migrations/20261023001000_profile_self_service.sql` to enable resident profile editing without allowing residents to change their role or utility.
 5. Run `migrations/20261109000000_activity_logs.sql` to create the utility-scoped advisory activity log.
 6. Run `migrations/20261109001000_advisory_statuses.sql` to normalize existing notices to Scheduled, Active, Resolved, or Cancelled.
-7. Run `migrations/20261109002000_resident_purok_profile.sql` to store each resident's selected Purok separately for accurate area-targeted notices.
+7. Run `migrations/20261109002000_resident_purok_profile.sql` to store each resident's selected Purok separately in their service-location profile.
 8. Create each utility administrator through **Authentication → Users**. Do not set `role` or `utility` in user metadata. Assign roles to accounts you control:
 
    ```sql
@@ -26,15 +26,16 @@ The portals use Supabase Auth and Supabase tables for sign-in and application re
 ## Configure the portals and APIs
 
 1. In Supabase **Project Settings → API**, copy the **Project URL** and the **publishable/anon key**.
-2. For each frontend portal (`frontend/apps/resident-web`, `frontend/apps/cepalco-web`, and `frontend/apps/water-web`), configure that portal's local `.env` file with:
+2. For each frontend portal (`frontend/apps/resident-web`, `frontend/apps/cepalco-web`, and `frontend/apps/water-web`), copy `.env.example` to `.env.local` and configure:
 
    ```text
    VITE_SUPABASE_URL=your_project_url
    VITE_SUPABASE_ANON_KEY=your_publishable_or_anon_key
+   VITE_GOOGLE_MAPS_API_KEY=your_restricted_browser_key
    ```
 
-   The publishable/anon key is intended for browser use; database RLS policies protect records. Restart Vite after changing these values.
-3. For each backend API environment (`backend/apps/resident-api`, `backend/apps/cepalco-api`, and `backend/apps/water-api`), set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in its local `.env` file using the URL and the **service_role/secret key**. The service-role key is server-only: never put it in any frontend `.env`, `VITE_*` variable, chat message, or source control.
+   The publishable/anon key is intended for browser use; database RLS policies protect records. Each example includes its API URL and port. Restart Vite after changing these values.
+3. Copy `backend/.env.example` to `backend/.env`. Set the shared `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` there using the URL and **service_role/secret key**. The shared backend env is loaded by all three APIs. For a setting that differs by utility, create a local `.env` or `.env.local` in that API's workspace folder (for example `backend/apps/cepalco-api/.env`); workspace-specific files override shared backend values, and shell-provided variables take precedence over env files. The service-role key is server-only: never put it in any frontend `.env`, `VITE_*` variable, chat message, or source control.
 4. Keep the existing API-specific Gmail and Meta environment variables configured. Those integrations still use their API's local SQLite database for Gmail connections and delivery records. Keep `GMAIL_TOKEN_ENCRYPTION_KEY` stable and use the same SQLite file for the APIs that need to share those records.
 5. Start the APIs and portals with `npm run dev:all`. Utility administrators sign in using the Supabase Auth email/password account whose profile has that utility's admin role. Residents register in the Resident portal; with email confirmation enabled, confirm the message before signing in.
 

@@ -66,3 +66,16 @@ test("Gmail advisory messages attach the uploaded announcement image", () => {
   assert.match(message, /Content-Disposition: attachment; filename="announcement\.png"/);
   assert.match(message, /iVBORw0KGgo=/);
 });
+
+test("Gmail advisory messages attach every selected announcement image", () => {
+  const first = parseGmailImageAttachment("data:image/png;base64,iVBORw0KGgo=");
+  const second = parseGmailImageAttachment("data:image/png;base64,iVBORw0KGgo=");
+  assert.ok(first);
+  assert.ok(second);
+  second.filename = "announcement-2.png";
+  const raw = createRawEmail("resident@example.test", "Service notice", "Details", [first, second]);
+  const message = Buffer.from(raw, "base64url").toString("utf8");
+  assert.match(message, /filename="announcement\.png"/);
+  assert.match(message, /filename="announcement-2\.png"/);
+  assert.equal((message.match(/Content-Disposition: attachment/g) ?? []).length, 2);
+});

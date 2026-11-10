@@ -196,7 +196,7 @@ export function createRawEmail(
   recipient: string,
   subject: string,
   body: string,
-  attachment?: GmailImageAttachment | null,
+  attachment?: GmailImageAttachment | GmailImageAttachment[] | null,
 ): string {
   if (
     !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(recipient) ||
@@ -219,7 +219,10 @@ export function createRawEmail(
     "MIME-Version: 1.0",
   ];
 
-  if (!attachment) {
+  const attachments = attachment
+    ? Array.isArray(attachment) ? attachment : [attachment]
+    : [];
+  if (attachments.length === 0) {
     return Buffer.from(
       [
         ...headers,
@@ -243,12 +246,14 @@ export function createRawEmail(
     "Content-Transfer-Encoding: base64",
     "",
     encodeBase64Lines(Buffer.from(body, "utf8")),
-    `--${boundary}`,
-    `Content-Type: ${attachment.mimeType}; name="${attachment.filename}"`,
-    `Content-Disposition: attachment; filename="${attachment.filename}"`,
-    "Content-Transfer-Encoding: base64",
-    "",
-    encodeBase64Lines(attachment.content),
+    ...attachments.flatMap(image => [
+      `--${boundary}`,
+      `Content-Type: ${image.mimeType}; name="${image.filename}"`,
+      `Content-Disposition: attachment; filename="${image.filename}"`,
+      "Content-Transfer-Encoding: base64",
+      "",
+      encodeBase64Lines(image.content),
+    ]),
     `--${boundary}--`,
     "",
   ].join("\r\n");
@@ -262,18 +267,27 @@ export async function sendGmailMessage(
   recipient: string,
   subject: string,
   body: string,
-  imageDataUrl?: string | null,
+  imageDataUrl?: string | string[] | null,
 ): Promise<void> {
   const auth = createOAuthClient(portal);
   auth.setCredentials({ refresh_token: refreshToken });
 
-  const attachment = parseGmailImageAttachment(imageDataUrl);
+  const attachments = (Array.isArray(imageDataUrl) ? imageDataUrl : imageDataUrl ? [imageDataUrl] : [])
+    .map((image, index) => {
+      const attachment = parseGmailImageAttachment(image);
+      if (!attachment) throw new Error("The announcement image is invalid.");
+      if (Array.isArray(imageDataUrl)) {
+        const extension = attachment.filename.split(".").at(-1);
+        attachment.filename = `announcement-${index + 1}.${extension}`;
+      }
+      return attachment;
+    });
   const gmail = google.gmail({ version: "v1", auth });
 
   await gmail.users.messages.send({
     userId: "me",
     requestBody: {
-      raw: createRawEmail(recipient, subject, body, attachment),
+      raw: createRawEmail(recipient, subject, body, attachments),
     },
   });
 }

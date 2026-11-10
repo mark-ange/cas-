@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 
 // ADDED: Shared coordinate type used by the publisher and the advisory map.
 export type CommunityAlertMapLocation = {
@@ -116,6 +116,7 @@ export function GoogleMap({
   mode,
   announcements = [],
   selectedArea,
+  selectedLocation,
   onLocationSelected,
   height = 340,
   label,
@@ -123,6 +124,7 @@ export function GoogleMap({
   mode: "picker" | "display";
   announcements?: CommunityAlertMapAnnouncement[];
   selectedArea?: string;
+  selectedLocation?: CommunityAlertMapLocation | null;
   onLocationSelected?: (location: CommunityAlertMapLocation | null) => void;
   height?: number;
   label?: string;
@@ -137,6 +139,7 @@ export function GoogleMap({
   const [mapError, setMapError] = useState("");
   const [pickerReady, setPickerReady] = useState(false);
   const [areaLookup, setAreaLookup] = useState<"idle" | "loading" | "failed">("idle");
+  const [fallbackLocation, setFallbackLocation] = useState<CommunityAlertMapLocation | null>(null);
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
 
   useEffect(() => {
@@ -161,7 +164,7 @@ export function GoogleMap({
     const handleAuthFailure = () => {
       if (disposed) return;
       setLoading(false);
-      setMapError("Google Maps rejected this site's URL. Add this exact localhost or production URL to the browser key's website restrictions in Google Cloud.");
+      setMapError(`Google Maps rejected this site's URL. In Google Cloud, add ${window.location.origin}/* to the browser key's website restrictions and allow the Maps JavaScript API.`);
     };
     window.addEventListener(MAP_AUTH_FAILURE_EVENT, handleAuthFailure);
 
@@ -325,11 +328,231 @@ export function GoogleMap({
 
   return <div className="relative overflow-hidden rounded-xl border border-slate-200 bg-slate-100" style={{ minHeight: height }}>
     <div ref={containerRef} style={{ height, width: "100%" }} aria-label={mode === "picker" ? "Click the map to select an affected location" : "Map of utility advisories"} />
-    {label && <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-md bg-white/95 px-3 py-2 text-xs font-bold text-slate-800 shadow">{label}</div>}
-    {loading && <div role="status" className="absolute inset-x-3 bottom-3 rounded-md bg-white/95 p-2 text-xs text-slate-600 shadow">Loading Google Maps…</div>}
-    {mapError && <div role="alert" className="absolute inset-x-3 bottom-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">{mapError}</div>}
+    {mapError && <FallbackTileMap
+      mode={mode}
+      announcements={announcements}
+      selectedLocation={selectedLocation ?? fallbackLocation}
+      onLocationSelected={location => {
+        setFallbackLocation(location);
+        onLocationSelectedRef.current?.(location);
+      }}
+      height={height}
+      label={label}
+      mapError={mapError}
+    />}
+    {label && !mapError && <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-md bg-white/95 px-3 py-2 text-xs font-bold text-slate-800 shadow">{label}</div>}
+    {loading && !mapError && <div role="status" className="absolute inset-x-3 bottom-3 rounded-md bg-white/95 p-2 text-xs text-slate-600 shadow">Loading Google Maps…</div>}
+    {mapError && <div className="sr-only" role="status">{mapError}</div>}
     {mode === "picker" && !loading && !mapError && areaLookup === "loading" && <div role="status" className="absolute inset-x-3 bottom-3 rounded-md bg-white/95 p-2 text-xs text-slate-600 shadow">Finding the selected area and placing its map pin…</div>}
     {mode === "picker" && !loading && !mapError && areaLookup === "failed" && <div role="alert" className="absolute inset-x-3 bottom-3 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900 shadow">Could not locate that area on the map. Check that the Maps Geocoding service is enabled, or click the map to place the pin manually.</div>}
     {mode === "display" && !loading && !mapError && validAnnouncementCount === 0 && <div className="absolute inset-x-3 bottom-3 rounded-md bg-white/95 p-2 text-xs text-slate-600 shadow">No announcements have saved map coordinates yet. Select a point when publishing a new advisory to add its marker.</div>}
   </div>;
+}
+
+type MapPixel = { x: number; y: number };
+type FallbackTile = MapPixel & { key: string; url: string };
+
+function projectLocation(location: CommunityAlertMapLocation, zoom: number): MapPixel {
+  const scale = 256 * 2 ** zoom;
+  const latitude = Math.max(-85.05112878, Math.min(85.05112878, location.latitude));
+  const sin = Math.sin(latitude * Math.PI / 180);
+  return {
+    x: (location.longitude + 180) / 360 * scale,
+    y: (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * scale,
+  };
+}
+
+function unprojectLocation(point: MapPixel, zoom: number): CommunityAlertMapLocation {
+  const scale = 256 * 2 ** zoom;
+  const longitude = point.x / scale * 360 - 180;
+  const n = Math.PI - 2 * Math.PI * point.y / scale;
+  return { latitude: 180 / Math.PI * Math.atan(Math.sinh(n)), longitude };
+}
+
+function FallbackTileMap({
+  mode,
+  announcements,
+  selectedLocation,
+  onLocationSelected,
+  height,
+  label,
+  mapError,
+}: {
+  mode: "picker" | "display";
+  announcements: CommunityAlertMapAnnouncement[];
+  selectedLocation: CommunityAlertMapLocation | null;
+  onLocationSelected: (location: CommunityAlertMapLocation) => void;
+  height: number;
+  label?: string;
+  mapError: string;
+}) {
+  const mapRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<{ pointerX: number; pointerY: number; center: CommunityAlertMapLocation; moved: boolean } | null>(null);
+  const [center, setCenter] = useState<CommunityAlertMapLocation>(() => {
+    if (selectedLocation) return selectedLocation;
+    const first = announcements.find(isValidLocation);
+    return first ? { latitude: first.latitude, longitude: first.longitude } : DEFAULT_CAGAYAN_DE_ORO;
+  });
+  const [zoom, setZoom] = useState(mode === "picker" ? 12 : 11);
+  const [width, setWidth] = useState(640);
+  const [activeAnnouncement, setActiveAnnouncement] = useState<number | null>(null);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const observer = new ResizeObserver(() => setWidth(map.clientWidth));
+    observer.observe(map);
+    setWidth(map.clientWidth);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (mode === "display") {
+      const first = announcements.find(isValidLocation);
+      if (first) setCenter({ latitude: first.latitude, longitude: first.longitude });
+    } else if (selectedLocation) {
+      setCenter(selectedLocation);
+    }
+  // Recenter only when the marker data or selected coordinate changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, announcements.map(item => `${item.id}:${item.latitude}:${item.longitude}`).join("|"), selectedLocation?.latitude, selectedLocation?.longitude]);
+
+  const centerPixel = projectLocation(center, zoom);
+  const origin = { x: centerPixel.x - width / 2, y: centerPixel.y - height / 2 };
+  const tiles = useMemo(() => {
+    const firstX = Math.floor(origin.x / 256);
+    const lastX = Math.floor((origin.x + width) / 256);
+    const firstY = Math.floor(origin.y / 256);
+    const lastY = Math.floor((origin.y + height) / 256);
+    const tileCount = 2 ** zoom;
+    const result: FallbackTile[] = [];
+    for (let tileY = firstY; tileY <= lastY; tileY += 1) {
+      if (tileY < 0 || tileY >= tileCount) continue;
+      for (let tileX = firstX; tileX <= lastX; tileX += 1) {
+        const wrappedX = ((tileX % tileCount) + tileCount) % tileCount;
+        result.push({
+          key: `${zoom}/${tileX}/${tileY}`,
+          x: tileX * 256 - origin.x,
+          y: tileY * 256 - origin.y,
+          url: `https://tile.openstreetmap.org/${zoom}/${wrappedX}/${tileY}.png`,
+        });
+      }
+    }
+    return result;
+  }, [height, origin.x, origin.y, width, zoom]);
+
+  const markerPosition = (location: CommunityAlertMapLocation): MapPixel => {
+    const point = projectLocation(location, zoom);
+    return { x: point.x - origin.x, y: point.y - origin.y };
+  };
+
+  function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = {
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      center,
+      moved: false,
+    };
+  }
+
+  function onPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const deltaX = event.clientX - drag.pointerX;
+    const deltaY = event.clientY - drag.pointerY;
+    if (Math.abs(deltaX) + Math.abs(deltaY) > 4) drag.moved = true;
+    if (!drag.moved) return;
+    const start = projectLocation(drag.center, zoom);
+    setCenter(unprojectLocation({ x: start.x - deltaX, y: start.y - deltaY }, zoom));
+  }
+
+  function onPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    dragRef.current = null;
+    if (drag.moved || mode !== "picker") return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const point = { x: origin.x + event.clientX - bounds.left, y: origin.y + event.clientY - bounds.top };
+    const location = unprojectLocation(point, zoom);
+    setCenter(location);
+    onLocationSelected(location);
+  }
+
+  function adjustZoom(amount: number) {
+    setZoom(current => Math.max(3, Math.min(19, current + amount)));
+  }
+
+  const validAnnouncements = announcements.filter(isValidLocation);
+  const pin = selectedLocation ? markerPosition(selectedLocation) : null;
+
+  return <div
+    ref={mapRef}
+    role={mode === "picker" ? "application" : undefined}
+    aria-label={mode === "picker" ? "OpenStreetMap location picker" : "OpenStreetMap advisory map"}
+    className="absolute inset-0 overflow-hidden bg-[#e5e7eb]"
+    style={{ height, touchAction: "none", cursor: mode === "picker" ? "crosshair" : "grab" }}
+    onPointerDown={onPointerDown}
+    onPointerMove={onPointerMove}
+    onPointerUp={onPointerUp}
+    onPointerCancel={() => { dragRef.current = null; }}
+    onWheel={event => {
+      event.preventDefault();
+      adjustZoom(event.deltaY < 0 ? 1 : -1);
+    }}
+  >
+    {tiles.map(tile => <img
+      key={tile.key}
+      src={tile.url}
+      alt=""
+      draggable={false}
+      className="pointer-events-none absolute h-64 w-64 max-w-none select-none"
+      style={{ left: tile.x, top: tile.y }}
+    />)}
+    {mode === "display" && validAnnouncements.map(item => {
+      const position = markerPosition(item);
+      return <button
+        key={item.id}
+        type="button"
+        title={`${item.title} — ${item.area}`}
+        aria-label={`${item.title}, ${item.utility}, ${item.area}`}
+        onPointerDown={event => event.stopPropagation()}
+        onClick={() => setActiveAnnouncement(activeAnnouncement === item.id ? null : item.id)}
+        className="absolute z-[2] grid h-8 w-8 -translate-x-1/2 -translate-y-full place-items-center rounded-full border-2 border-white bg-rose-700 text-sm font-bold text-white shadow-lg"
+        style={{ left: position.x, top: position.y }}
+      >•</button>;
+    })}
+    {mode === "picker" && pin && <span
+      aria-label="Selected location"
+      className="pointer-events-none absolute z-[2] grid h-8 w-8 -translate-x-1/2 -translate-y-full place-items-center rounded-full border-2 border-white bg-emerald-700 text-sm font-bold text-white shadow-lg"
+      style={{ left: pin.x, top: pin.y }}
+    >•</span>}
+    {mode === "display" && validAnnouncements.length === 0 && <div className="absolute left-1/2 top-1/2 z-[2] -translate-x-1/2 -translate-y-1/2 rounded-md bg-white/95 px-3 py-2 text-xs text-slate-700 shadow">No announcements have saved coordinates.</div>}
+    {activeAnnouncement !== null && (() => {
+      const announcement = validAnnouncements.find(item => item.id === activeAnnouncement);
+      if (!announcement) return null;
+      const position = markerPosition(announcement);
+      return <div className="pointer-events-none absolute z-[3] max-w-56 -translate-x-1/2 -translate-y-[calc(100%+2.25rem)] rounded-md bg-white px-3 py-2 text-xs text-slate-800 shadow-lg" style={{ left: position.x, top: position.y }}>
+        <strong className="block">{announcement.title}</strong>
+        <span>{announcement.utility} · {announcement.area}</span>
+        <small className="block">Status: {announcement.status}</small>
+      </div>;
+    })()}
+    {label && <div className="pointer-events-none absolute left-3 top-3 z-[4] rounded-md bg-white/95 px-3 py-2 text-xs font-bold text-slate-800 shadow">{label}</div>}
+    <div className="absolute right-3 top-3 z-[4] grid overflow-hidden rounded-md border border-slate-300 bg-white shadow">
+      <button type="button" aria-label="Zoom in" onPointerDown={event => event.stopPropagation()} onClick={() => adjustZoom(1)} className="h-8 w-9 border-b border-slate-200 text-lg font-bold text-slate-700">+</button>
+      <button type="button" aria-label="Zoom out" onPointerDown={event => event.stopPropagation()} onClick={() => adjustZoom(-1)} className="h-8 w-9 text-lg font-bold text-slate-700">−</button>
+    </div>
+    <div role="note" className="absolute inset-x-2 bottom-2 z-[4] flex flex-wrap items-center justify-between gap-1 rounded bg-white/95 px-2 py-1.5 text-[10px] text-slate-700 shadow">
+      <span>{mode === "picker" ? "Click or tap to place a pin; drag to move the map." : "Map fallback is active."} {mapError.includes("rejected") ? "Google Maps key referrer restriction." : ""}</span>
+      <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer" className="text-slate-600 underline">© OpenStreetMap contributors</a>
+    </div>
+  </div>;
+}
+
+function isValidLocation(location: CommunityAlertMapLocation): location is CommunityAlertMapLocation {
+  return Number.isFinite(location.latitude) && Number.isFinite(location.longitude) &&
+    location.latitude >= -90 && location.latitude <= 90 &&
+    location.longitude >= -180 && location.longitude <= 180;
 }

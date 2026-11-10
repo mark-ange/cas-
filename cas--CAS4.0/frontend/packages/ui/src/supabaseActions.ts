@@ -1,13 +1,69 @@
-import type { Advisory, Portal, ServiceReport, SMSRecord, WorkOrder } from "./prototypeStore.js";
+import type { Advisory, Portal, ServiceReport, SMSRecord, Status, WorkOrder } from "./domainTypes.js";
 import { getSupabase, profileActor, raiseSupabaseError, type SupabaseProfile } from "./supabase.js";
 
 type ActionOptions = RequestInit;
+const PROFILE_COLUMNS = "id,name,email,role,utility,phone_number,address,barangay,purok,district,city,postal_code,profile_image,sms_alerts,notify_maintenance,notify_email_digest,immediate_email_alerts";
 
 function toCamel(row: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(row).map(([key, value]) => [
     key.replace(/_([a-z])/g, (_match, letter: string) => letter.toUpperCase()),
     value,
   ]));
+}
+
+function advisoryFromRow(row: Record<string, unknown>): Advisory {
+  const channels = Array.isArray(row.channels)
+    ? row.channels.filter((channel): channel is string => typeof channel === "string")
+    : [];
+  return {
+    id: Number(row.id),
+    reference: String(row.reference ?? ""),
+    title: String(row.title ?? ""),
+    utility: String(row.utility ?? ""),
+    type: String(row.type ?? ""),
+    area: String(row.area ?? ""),
+    status: String(row.status ?? "Active") as Status,
+    details: String(row.details ?? ""),
+    location: String(row.location ?? ""),
+    serviceStatus: String(row.service_status ?? "Upcoming Maintenance Interruption"),
+    provider: String(row.provider ?? ""),
+    createdAt: String(row.created_at ?? ""),
+    scheduledAt: row.scheduled_at == null ? null : String(row.scheduled_at),
+    priority: typeof row.priority === "string" ? row.priority : undefined,
+    serviceStartsAt: row.service_starts_at == null ? null : String(row.service_starts_at),
+    estimatedRestorationAt: row.estimated_restoration_at == null ? null : String(row.estimated_restoration_at),
+    publicationStatus: typeof row.publication_status === "string" ? row.publication_status as Advisory["publicationStatus"] : undefined,
+    channels,
+    imageUrl: null,
+    imageUrls: [],
+  };
+}
+
+function storedAnnouncementImages(value: unknown): string[] {
+  if (value === null || value === undefined || value === "") return [];
+  if (Array.isArray(value)) {
+    if (!value.every(image => typeof image === "string")) throw new Error("Stored announcement images are invalid.");
+    return value;
+  }
+  if (typeof value !== "string") throw new Error("Stored announcement images are invalid.");
+  if (value.startsWith("[")) {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed) || !parsed.every(image => typeof image === "string")) {
+      throw new Error("Stored announcement images are invalid.");
+    }
+    return parsed;
+  }
+  return [value];
+}
+
+export async function loadAdvisoryImages(advisoryId: number): Promise<string[]> {
+  const { data, error } = await getSupabase()
+    .from("advisories")
+    .select("image_data_url")
+    .eq("id", advisoryId)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return storedAnnouncementImages(data?.image_data_url);
 }
 
 export async function supabaseAction<T>(
@@ -22,7 +78,7 @@ export async function supabaseAction<T>(
   const profileForPortal = async (): Promise<SupabaseProfile> => {
     const { data: { user }, error } = await supabase.auth.getUser();
     if (error || !user) throw new Error(error?.message || "Please sign in to continue.");
-    const { data, error: profileError } = await supabase.from("profiles").select("*").eq("id", user.id).single();
+    const { data, error: profileError } = await supabase.from("profiles").select(PROFILE_COLUMNS).eq("id", user.id).single();
     if (profileError) throw new Error(profileError.message);
     const profile = data as SupabaseProfile;
     if (portal === "resident" ? profile.role !== "resident" : profile.role !== "admin" || profile.utility !== utility) {
@@ -63,7 +119,7 @@ export async function supabaseAction<T>(
       password: String(body.password ?? ""),
     });
     if (error || !data.user || !data.session) throw new Error(error?.message || "Sign in failed.");
-    const { data: profile, error: profileError } = await supabase.from("profiles").select("*").eq("id", data.user.id).single();
+    const { data: profile, error: profileError } = await supabase.from("profiles").select(PROFILE_COLUMNS).eq("id", data.user.id).single();
     if (profileError) throw new Error(profileError.message);
     const actor = profileActor(profile as SupabaseProfile);
     if (portal === "resident" ? actor.role !== "resident" : actor.role !== "admin" || actor.utility !== utility) {
@@ -97,7 +153,7 @@ export async function supabaseAction<T>(
       terms_accepted_at: new Date().toISOString(),
     }).eq("id", data.user.id);
     raiseSupabaseError(profileError);
-    const { data: profile, error: readError } = await supabase.from("profiles").select("*").eq("id", data.user.id).single();
+    const { data: profile, error: readError } = await supabase.from("profiles").select(PROFILE_COLUMNS).eq("id", data.user.id).single();
     if (readError) throw new Error(readError.message);
     return { token: data.session.access_token, actor: profileActor(profile as SupabaseProfile) } as T;
   }
@@ -125,7 +181,7 @@ export async function supabaseAction<T>(
       immediate_email_alerts: body.immediateEmailAlerts,
     }).eq("id", profile.id);
     raiseSupabaseError(error);
-    const { data, error: readError } = await supabase.from("profiles").select("*").eq("id", profile.id).single();
+    const { data, error: readError } = await supabase.from("profiles").select(PROFILE_COLUMNS).eq("id", profile.id).single();
     if (readError) throw new Error(readError.message);
     return { actor: profileActor(data as SupabaseProfile) } as T;
   }
@@ -143,27 +199,37 @@ export async function supabaseAction<T>(
   }
 
   if (path === "/advisories" && method === "GET") {
-    let query = supabase.from("advisories").select("*").order("id", { ascending: false });
-    if (utility) query = query.eq("utility", utility);
-    const { data, error } = await query;
-    if (error) throw new Error(error.message);
-    const ids = (data ?? []).map(row => row.id);
-    const { data: posts, error: postError } = ids.length
-      ? await supabase.from("social_posts").select("advisory_id,platform,permalink_url").in("advisory_id", ids)
-      : { data: [], error: null };
-    if (postError) throw new Error(postError.message);
     const links = new Map<number, Record<string, string>>();
-    for (const post of posts ?? []) {
-      const existing = links.get(post.advisory_id) ?? {};
-      existing[post.platform] = post.permalink_url ?? "";
-      links.set(post.advisory_id, existing);
+    const advisories: Record<string, unknown>[] = [];
+    const pageSize = 100;
+    for (let from = 0; ; from += pageSize) {
+      let query = supabase.from("advisories")
+        .select("id,reference,title,utility,type,area,status,details,location,service_status,provider,priority,service_starts_at,estimated_restoration_at,created_at,latitude,longitude,scheduled_at,publication_status,channels")
+        .order("id", { ascending: false })
+        .range(from, from + pageSize - 1);
+      if (utility) query = query.eq("utility", utility);
+      const { data, error } = await query;
+      if (error) throw new Error(error.message);
+      const rows = (data ?? []) as Record<string, unknown>[];
+      advisories.push(...rows);
+      const ids = rows.map(row => Number(row.id));
+      if (ids.length) {
+        const { data: posts, error: postError } = await supabase.from("social_posts")
+          .select("advisory_id,platform,permalink_url")
+          .in("advisory_id", ids);
+        if (postError) throw new Error(postError.message);
+        for (const post of posts ?? []) {
+          const existing = links.get(post.advisory_id) ?? {};
+          existing[post.platform] = post.permalink_url ?? "";
+          links.set(post.advisory_id, existing);
+        }
+      }
+      if (rows.length < pageSize) break;
     }
-    return (data ?? []).map(row => ({
-      ...toCamel(row),
-      imageUrl: row.image_data_url,
-      facebookUrl: links.get(row.id)?.facebook || null,
-      instagramUrl: links.get(row.id)?.instagram || null,
-      channels: row.channels,
+    return advisories.map(row => ({
+      ...advisoryFromRow(row),
+      facebookUrl: links.get(Number(row.id))?.facebook || null,
+      instagramUrl: links.get(Number(row.id))?.instagram || null,
     })) as Advisory[] as T;
   }
 
@@ -177,17 +243,22 @@ export async function supabaseAction<T>(
       type: body.type ?? "Service disruption",
       area: body.area,
       details: body.details,
+      location: body.location ?? "",
+      service_status: body.serviceStatus ?? "Upcoming Maintenance Interruption",
+      provider: body.provider ?? "",
       status: scheduledAt ? "Scheduled" : "Active",
       priority: body.priority ?? "Normal",
       service_starts_at: body.serviceStartsAt || null,
       estimated_restoration_at: body.estimatedRestorationAt || null,
-      image_data_url: body.imageDataUrl || null,
+      image_data_url: Array.isArray(body.imageDataUrls)
+        ? body.imageDataUrls.length === 1 ? body.imageDataUrls[0] : JSON.stringify(body.imageDataUrls)
+        : body.imageDataUrl || null,
       latitude: body.latitude || null,
       longitude: body.longitude || null,
       scheduled_at: scheduledAt,
       publication_status: scheduledAt ? "scheduled" : "published",
       channels: body.channels ?? [],
-    }).select("*").single();
+    }).select("id,reference,title,utility,type,area,status,details,location,service_status,provider,priority,service_starts_at,estimated_restoration_at,created_at,latitude,longitude,scheduled_at,publication_status,channels").single();
     if (error) throw new Error(error.message);
     await recordActivity(scheduledAt ? "Advisory scheduled" : "Advisory prepared", Number(data.id), `${String(body.title)} — ${String(body.area)}; channels: ${(body.channels as string[] | undefined)?.join(", ") ?? "none"}.`);
     let delivery: Record<string, unknown> | null = null;
@@ -239,7 +310,7 @@ export async function supabaseAction<T>(
   }
 
   if (path === "/work-orders" && method === "GET") {
-    let query = supabase.from("work_orders").select("*").order("starts_at");
+    let query = supabase.from("work_orders").select("id,reference,title,utility,area,description,status,starts_at,ends_at,created_at").order("starts_at");
     if (utility) query = query.eq("utility", utility);
     const { data, error } = await query;
     if (error) throw new Error(error.message);
@@ -256,7 +327,7 @@ export async function supabaseAction<T>(
       description: body.description ?? "",
       starts_at: body.startsAt,
       ends_at: body.endsAt,
-    }).select("*").single();
+    }).select("id,reference,title,utility,area,description,status,starts_at,ends_at,created_at").single();
     if (error) throw new Error(error.message);
     return toCamel(data) as T;
   }
@@ -270,14 +341,14 @@ export async function supabaseAction<T>(
       utility: body.utility,
       area: body.area,
       details: body.details ?? "",
-    }).select("*").single();
+    }).select("id,reference,user_id,title,utility,area,details,status,created_at").single();
     if (error) throw new Error(error.message);
     return toCamel(data) as T;
   }
 
   if (path === "/reports" && method === "GET") {
     await profileForPortal();
-    const { data, error } = await supabase.from("reports").select("*").order("id", { ascending: false });
+    const { data, error } = await supabase.from("reports").select("id,reference,user_id,title,utility,area,details,status,created_at").order("id", { ascending: false });
     if (error) throw new Error(error.message);
     return (data ?? []).map(toCamel) as ServiceReport[] as T;
   }
@@ -294,7 +365,7 @@ export async function supabaseAction<T>(
 
   if (path === "/network" && method === "GET") {
     await profileForPortal();
-    const { data, error } = await supabase.from("network_readings").select("*").eq("utility", utility).order("id");
+    const { data, error } = await supabase.from("network_readings").select("id,utility,district,area,pressure_psi,reservoir_percent,recorded_at").eq("utility", utility).order("id");
     if (error) throw new Error(error.message);
     return (data ?? []).map(toCamel) as T;
   }

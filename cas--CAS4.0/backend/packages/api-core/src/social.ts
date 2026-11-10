@@ -25,23 +25,29 @@ function environment(portal: string, name: string): string {
   return value;
 }
 
-function graphVersion(): string {
-  return process.env.META_GRAPH_API_VERSION?.trim() || "v24.0";
+function graphVersion(portal: string): string {
+  return environment(portal, "META_GRAPH_API_VERSION") || "v24.0";
 }
 
-function graphBase(): string {
-  return `https://graph.facebook.com/${graphVersion()}`;
+function graphBase(portal: string): string {
+  return `https://graph.facebook.com/${graphVersion(portal)}`;
 }
 
 function advisoryMessage(title: string, area: string, details: string, reference: string): string {
   return `${title}\n\nAffected area: ${area}\n\n${details}\n\nReference: ${reference}`;
 }
 
-async function fetchPermalink(id: string, fields: "permalink_url" | "permalink", accessToken: string): Promise<string | null> {
+async function fetchPermalink(
+  portal: string,
+  id: string,
+  fields: "permalink_url" | "permalink",
+  accessToken: string,
+  attempts = 3,
+): Promise<string | null> {
   let lastFailure = "Meta returned no public permalink.";
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const response = await fetch(`${graphBase()}/${encodeURIComponent(id)}?fields=${fields}&access_token=${encodeURIComponent(accessToken)}`);
+      const response = await fetch(`${graphBase(portal)}/${encodeURIComponent(id)}?fields=${fields}&access_token=${encodeURIComponent(accessToken)}`);
       if (response.ok) {
         const result = await response.json() as { permalink_url?: string; permalink?: string };
         const permalink = fields === "permalink_url" ? result.permalink_url : result.permalink;
@@ -54,9 +60,22 @@ async function fetchPermalink(id: string, fields: "permalink_url" | "permalink",
     } catch (error) {
       lastFailure = error instanceof Error ? error.message : "Meta permalink lookup failed.";
     }
-    if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
+    if (attempt < attempts - 1) await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
   }
   console.warn(`[social] Could not resolve ${fields} for published media ${id}: ${lastFailure}`);
+  return null;
+}
+
+export async function resolveInstagramPermalink(portal: string, id: string): Promise<string | null> {
+  const tokens = [
+    environment(portal, "META_INSTAGRAM_ACCESS_TOKEN"),
+    environment(portal, "META_FACEBOOK_PAGE_ACCESS_TOKEN"),
+  ].filter((token, index, values): token is string => Boolean(token) && values.indexOf(token) === index);
+  for (const token of tokens) {
+    const permalink = await fetchPermalink(portal, id, "permalink", token, 8);
+    if (permalink?.startsWith("https://www.instagram.com/") ||
+        permalink?.startsWith("https://instagram.com/")) return permalink;
+  }
   return null;
 }
 
@@ -72,7 +91,7 @@ async function publishToFacebook(
   area: string,
   details: string,
   reference: string,
-  imageDataUrl: string | null,
+  imageDataUrls: string[],
 ): Promise<SocialPlatformResult> {
   const pageId = environment(portal, "META_FACEBOOK_PAGE_ID");
   const accessToken = environment(portal, "META_FACEBOOK_PAGE_ACCESS_TOKEN");
@@ -82,16 +101,59 @@ async function publishToFacebook(
 
   const message = advisoryMessage(title, area, details, reference);
   try {
-    if (imageDataUrl) {
-      const attachment = parseGmailImageAttachment(imageDataUrl);
-if (!attachment) {
-  return { platform: "facebook", status: "failed", message: "The announcement image is invalid." };
-}
+    if (imageDataUrls.length > 1) {
+      const mediaIds: string[] = [];
+      for (const [index, imageDataUrl] of imageDataUrls.entries()) {
+        const attachment = parseGmailImageAttachment(imageDataUrl);
+        if (!attachment) {
+          return { platform: "facebook", status: "failed", message: "An announcement image is invalid." };
+        }
+        const photoForm = new FormData();
+        photoForm.append("access_token", accessToken);
+        photoForm.append("published", "false");
+        photoForm.append("source", new Blob([new Uint8Array(attachment.content)], { type: attachment.mimeType }), `announcement-${index + 1}.${attachment.filename.split(".").at(-1)}`);
+        const photoResponse = await fetch(`${graphBase(portal)}/${encodeURIComponent(pageId)}/photos`, {
+          method: "POST",
+          body: photoForm,
+        });
+        const photo = await photoResponse.json() as { id?: string; error?: { message?: string } };
+        if (!photoResponse.ok || !photo.id) {
+          return { platform: "facebook", status: "failed", message: photo.error?.message || "Facebook could not upload an announcement image." };
+        }
+        mediaIds.push(photo.id);
+      }
+
+      const postResponse = await fetch(`${graphBase(portal)}/${encodeURIComponent(pageId)}/feed`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          message,
+          access_token: accessToken,
+          ...Object.fromEntries(mediaIds.map((id, index) => [`attached_media[${index}]`, JSON.stringify({ media_fbid: id })])),
+        }),
+      });
+      const post = await postResponse.json() as { id?: string; error?: { message?: string } };
+      if (!postResponse.ok || !post.id) {
+        return { platform: "facebook", status: "failed", message: post.error?.message || "Facebook could not publish the image album." };
+      }
+      const permalinkUrl = await fetchPermalink(portal, post.id, "permalink_url", accessToken);
+      return {
+        platform: "facebook",
+        status: "published",
+        id: post.id,
+        ...(permalinkUrl ? { permalinkUrl } : { message: "Facebook published the post, but its public link could not be confirmed." }),
+      };
+    }
+    if (imageDataUrls.length === 1) {
+      const attachment = parseGmailImageAttachment(imageDataUrls[0]);
+      if (!attachment) {
+        return { platform: "facebook", status: "failed", message: "The announcement image is invalid." };
+      }
       const form = new FormData();
       form.append("message", message);
       form.append("access_token", accessToken);
       form.append("source", new Blob([new Uint8Array(attachment.content)], { type: attachment.mimeType }), attachment.filename);
-      const response = await fetch(`${graphBase()}/${encodeURIComponent(pageId)}/photos`, {
+      const response = await fetch(`${graphBase(portal)}/${encodeURIComponent(pageId)}/photos`, {
         method: "POST",
         body: form,
       });
@@ -100,7 +162,7 @@ if (!attachment) {
         return { platform: "facebook", status: "failed", message: result.error?.message || "Facebook could not publish the image." };
       }
       const id = result.post_id ?? result.id!;
-      const permalinkUrl = await fetchPermalink(id, "permalink_url", accessToken);
+      const permalinkUrl = await fetchPermalink(portal, id, "permalink_url", accessToken);
       const confirmedPermalink = permalinkUrl ?? facebookPermalinkFromPostId(pageId, id);
       return {
         platform: "facebook",
@@ -110,7 +172,7 @@ if (!attachment) {
       };
     }
 
-    const response = await fetch(`${graphBase()}/${encodeURIComponent(pageId)}/feed`, {
+    const response = await fetch(`${graphBase(portal)}/${encodeURIComponent(pageId)}/feed`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ message, access_token: accessToken }),
@@ -119,7 +181,7 @@ if (!attachment) {
     if (!response.ok || !result.id) {
       return { platform: "facebook", status: "failed", message: result.error?.message || "Facebook could not publish the announcement." };
     }
-    const permalinkUrl = await fetchPermalink(result.id, "permalink_url", accessToken);
+    const permalinkUrl = await fetchPermalink(portal, result.id, "permalink_url", accessToken);
     const confirmedPermalink = permalinkUrl ?? facebookPermalinkFromPostId(pageId, result.id);
     return {
       platform: "facebook",
@@ -135,6 +197,7 @@ if (!attachment) {
 async function uploadToSupabaseStorage(
   advisoryId: number,
   imageDataUrl: string,
+  imageIndex: number,
 ): Promise<string | null> {
   const supabaseUrl = process.env.SUPABASE_URL?.trim();
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
@@ -149,7 +212,7 @@ async function uploadToSupabaseStorage(
     });
 
     const extension = attachment.mimeType === "image/png" ? "png" : attachment.mimeType === "image/webp" ? "webp" : "jpg";
-    const filename = `advisory-${advisoryId}-${Date.now()}.${extension}`;
+    const filename = `advisory-${advisoryId}-${imageIndex + 1}-${Date.now()}.${extension}`;
 
     const { error: uploadError } = await supabase.storage
       .from("advisories")
@@ -185,13 +248,50 @@ async function uploadToSupabaseStorage(
   }
 }
 
+async function waitForInstagramMediaReady(
+  portal: string,
+  mediaId: string,
+  accessToken: string,
+): Promise<{ ready: boolean; message?: string }> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const response = await fetch(
+      `${graphBase(portal)}/${encodeURIComponent(mediaId)}?fields=status_code,status&access_token=${encodeURIComponent(accessToken)}`,
+    );
+    const result = await response.json() as {
+      status_code?: string;
+      status?: string;
+      error?: { message?: string };
+    };
+    if (!response.ok) {
+      return {
+        ready: false,
+        message: result.error?.message || `Instagram media status check returned HTTP ${response.status}.`,
+      };
+    }
+
+    const status = result.status_code?.toUpperCase();
+    if (status === "FINISHED") return { ready: true };
+    if (status === "ERROR" || status === "EXPIRED") {
+      return {
+        ready: false,
+        message: result.status || `Instagram media processing ended with status ${status}.`,
+      };
+    }
+    if (attempt < 19) await new Promise(resolve => setTimeout(resolve, 1500));
+  }
+  return {
+    ready: false,
+    message: "Instagram is still processing the image. Wait a little and retry publishing.",
+  };
+}
+
 async function publishToInstagram(
   portal: string,
   title: string,
   area: string,
   details: string,
   reference: string,
-  imageDataUrl: string | null,
+  imageDataUrls: string[],
   advisoryId: number,
   publicBaseUrl: string,
 ): Promise<SocialPlatformResult> {
@@ -204,18 +304,21 @@ async function publishToInstagram(
   if (!accountId || candidateTokens.length === 0) {
     return { platform: "instagram", status: "not_configured", message: "Instagram publishing is not configured." };
   }
-  if (!imageDataUrl) {
+  if (imageDataUrls.length === 0) {
     return { platform: "instagram", status: "failed", message: "Instagram publishing requires an announcement image." };
   }
 
-  let imageUrl: string | null = await uploadToSupabaseStorage(advisoryId, imageDataUrl);
-
-  if (!imageUrl) {
-    const configuredPublicBaseUrl = environment(portal, "META_PUBLIC_BASE_URL") || publicBaseUrl;
-    if (!configuredPublicBaseUrl) {
-      return { platform: "instagram", status: "failed", message: "Instagram publishing requires either Supabase Storage or META_PUBLIC_BASE_URL to host the announcement image." };
+  const imageUrls: string[] = [];
+  for (const [index, imageDataUrl] of imageDataUrls.entries()) {
+    let imageUrl: string | null = await uploadToSupabaseStorage(advisoryId, imageDataUrl, index);
+    if (!imageUrl) {
+      const configuredPublicBaseUrl = environment(portal, "META_PUBLIC_BASE_URL") || publicBaseUrl;
+      if (!configuredPublicBaseUrl) {
+        return { platform: "instagram", status: "failed", message: "Instagram publishing requires either Supabase Storage or META_PUBLIC_BASE_URL to host the announcement image." };
+      }
+      imageUrl = `${configuredPublicBaseUrl.replace(/\/$/, "")}/advisories/${advisoryId}${index === 0 ? "/image" : `/images/${index}`}`;
     }
-    imageUrl = `${configuredPublicBaseUrl.replace(/\/$/, "")}/advisories/${advisoryId}/image`;
+    imageUrls.push(imageUrl);
   }
 
   const caption = advisoryMessage(title, area, details, reference);
@@ -225,16 +328,49 @@ async function publishToInstagram(
 
     for (const token of candidateTokens) {
       activeToken = token;
-      const containerResponse = await fetch(`${graphBase()}/${encodeURIComponent(accountId)}/media`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ image_url: imageUrl, caption, access_token: token }),
-      });
-      container = await containerResponse.json() as { id?: string; error?: { message?: string; code?: number } };
-      if (containerResponse.ok && container.id) {
+      let containerResponseOk = false;
+      if (imageUrls.length === 1) {
+        const containerResponse = await fetch(`${graphBase(portal)}/${encodeURIComponent(accountId)}/media`, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ image_url: imageUrls[0], caption, access_token: token }),
+        });
+        containerResponseOk = containerResponse.ok;
+        container = await containerResponse.json() as { id?: string; error?: { message?: string; code?: number } };
+      } else {
+        const children: string[] = [];
+        for (const imageUrl of imageUrls) {
+          const childResponse = await fetch(`${graphBase(portal)}/${encodeURIComponent(accountId)}/media`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ image_url: imageUrl, is_carousel_item: "true", access_token: token }),
+          });
+          const child = await childResponse.json() as { id?: string; error?: { message?: string; code?: number } };
+          if (!childResponse.ok || !child.id) {
+            container = { error: child.error ?? { message: "Instagram could not create an image carousel item." } };
+            break;
+          }
+          children.push(child.id);
+        }
+        if (children.length === imageUrls.length) {
+          const carouselResponse = await fetch(`${graphBase(portal)}/${encodeURIComponent(accountId)}/media`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              media_type: "CAROUSEL",
+              children: children.join(","),
+              caption,
+              access_token: token,
+            }),
+          });
+          containerResponseOk = carouselResponse.ok;
+          container = await carouselResponse.json() as { id?: string; error?: { message?: string; code?: number } };
+        }
+      }
+      if (containerResponseOk && container?.id) {
         break;
       }
-      const isAuthError = container.error?.code === 190 || /access token|decrypted|expired|invalid/i.test(container.error?.message ?? "");
+      const isAuthError = container?.error?.code === 190 || /access token|decrypted|expired|invalid/i.test(container?.error?.message ?? "");
       if (!isAuthError) {
         break;
       }
@@ -244,7 +380,12 @@ async function publishToInstagram(
       return { platform: "instagram", status: "failed", message: container?.error?.message || "Instagram could not create the media container." };
     }
 
-    const publishResponse = await fetch(`${graphBase()}/${encodeURIComponent(accountId)}/media_publish`, {
+    const readiness = await waitForInstagramMediaReady(portal, container.id, activeToken);
+    if (!readiness.ready) {
+      return { platform: "instagram", status: "failed", message: readiness.message || "Instagram media is not ready to publish." };
+    }
+
+    const publishResponse = await fetch(`${graphBase(portal)}/${encodeURIComponent(accountId)}/media_publish`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ creation_id: container.id, access_token: activeToken }),
@@ -253,7 +394,7 @@ async function publishToInstagram(
     if (!publishResponse.ok || !published.id) {
       return { platform: "instagram", status: "failed", message: published.error?.message || "Instagram could not publish the announcement." };
     }
-    const permalinkUrl = await fetchPermalink(published.id, "permalink", activeToken);
+    const permalinkUrl = await resolveInstagramPermalink(portal, published.id);
     return { platform: "instagram", status: "published", id: published.id, ...(permalinkUrl ? { permalinkUrl } : { message: "Instagram published the post, but Meta did not return its permalink. Check the connected account permissions." }) };
   } catch (error) {
     return { platform: "instagram", status: "failed", message: error instanceof Error ? error.message : "Instagram publishing failed." };
@@ -268,12 +409,13 @@ export async function publishAnnouncementToSocial(
   title: string,
   area: string,
   details: string,
-  imageDataUrl: string | null,
+  imageDataUrls: string[] | null,
   selectedPlatforms: SocialPlatform[] = ["facebook"],
 ): Promise<SocialDeliverySummary> {
+  const images = imageDataUrls ?? [];
   const platforms = await Promise.all(selectedPlatforms.map(platform => platform === "facebook"
-    ? publishToFacebook(portal, title, area, details, reference, imageDataUrl)
-    : publishToInstagram(portal, title, area, details, reference, imageDataUrl, advisoryId, environment(portal, "META_PUBLIC_BASE_URL"))));
+    ? publishToFacebook(portal, title, area, details, reference, images)
+    : publishToInstagram(portal, title, area, details, reference, images, advisoryId, environment(portal, "META_PUBLIC_BASE_URL"))));
 
   const configuredPlatforms = platforms.filter(result => result.status !== "not_configured");
   const published = platforms.filter(result => result.status === "published").length;
@@ -289,14 +431,19 @@ export async function publishAnnouncementToSocial(
 
 export function socialConfiguration(portal: string) {
   const facebook = Boolean(environment(portal, "META_FACEBOOK_PAGE_ID") && environment(portal, "META_FACEBOOK_PAGE_ACCESS_TOKEN"));
+  const instagramAccessToken = environment(portal, "META_INSTAGRAM_ACCESS_TOKEN");
+  const pageAccessToken = environment(portal, "META_FACEBOOK_PAGE_ACCESS_TOKEN");
   const hasPublicStorage = Boolean(
     (process.env.SUPABASE_URL?.trim() && process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()) ||
     environment(portal, "META_PUBLIC_BASE_URL")
   );
   const instagram = Boolean(
     environment(portal, "META_INSTAGRAM_BUSINESS_ACCOUNT_ID") &&
-    (environment(portal, "META_INSTAGRAM_ACCESS_TOKEN") || environment(portal, "META_FACEBOOK_PAGE_ACCESS_TOKEN")) &&
+    (instagramAccessToken || pageAccessToken) &&
     hasPublicStorage
   );
-  return { facebook, instagram };
+  const instagramTokenSource = instagramAccessToken
+    ? "instagram"
+    : pageAccessToken ? "facebook_page" : "missing";
+  return { facebook, instagram, instagramTokenSource };
 }

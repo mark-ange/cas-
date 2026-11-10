@@ -89,6 +89,16 @@ button:not(:disabled) { transition: color .16s ease, background-color .16s ease,
 button:disabled { cursor: not-allowed; }
 input, select, textarea { accent-color: var(--brand); }
 input::placeholder, textarea::placeholder { opacity: 1; }
+.portal-layout [class~="text-[8px]"],
+.portal-layout [class~="text-[9px]"],
+.portal-layout [class~="text-[10px]"],
+.portal-layout [class~="text-[11px]"] {
+  font-size: 0.75rem !important;
+}
+.resident-preference:focus-within .resident-toggle {
+  outline: 2px solid var(--brand);
+  outline-offset: 3px;
+}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
@@ -2373,6 +2383,23 @@ button.cepalco-secondary:hover {
   object-fit: cover;
 }
 
+.standard-announcement-gallery {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+}
+
+.standard-announcement-gallery img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: cover;
+}
+
 .standard-announcement-placeholder {
   display: flex;
   width: 100%;
@@ -2560,5 +2587,295 @@ button.cepalco-secondary:hover {
 
   .standard-announcement-content {
     min-height: 0;
+  }
+}
+
+/* Shared product polish: consistent surfaces and resilient narrow layouts. */
+.portal-layout {
+  width: min(100%, 1600px);
+}
+
+.portal-layout > section,
+.portal-page-heading,
+.admin-page-stack,
+.resident-workspace,
+.water-page,
+.cepalco-page-stack {
+  min-width: 0;
+}
+
+.portal-page-heading {
+  align-items: center;
+  padding-bottom: 4px;
+}
+
+.portal-page-heading h1 {
+  overflow-wrap: anywhere;
+}
+
+.portal-resident .resident-workspace article,
+.portal-cepalco .admin-overview article,
+.portal-water .admin-overview article,
+.portal-cepalco .cepalco-incident-card,
+.portal-water .water-report-card,
+.standard-announcement-card {
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 8px 24px rgba(15, 23, 42, .035);
+}
+
+.portal-resident .resident-workspace article:hover,
+.portal-cepalco .cepalco-incident-card:hover,
+.portal-water .water-report-card:hover,
+.standard-announcement-card:hover {
+  box-shadow: 0 12px 30px rgba(15, 23, 42, .09);
+}
+
+.standard-announcement-content {
+  min-height: 0;
+}
+
+.portal-resident .portal-layout,
+.portal-cepalco .portal-layout,
+.portal-water .portal-layout {
+  padding-top: clamp(16px, 2.2vw, 28px);
+  padding-bottom: clamp(20px, 3vw, 36px);
+}
+
+.portal-resident .portal-sidebar,
+.portal-cepalco .portal-sidebar,
+.portal-water .portal-sidebar {
+  max-width: 100%;
+}
+
+.portal-resident .portal-page-heading > div:last-child,
+.portal-cepalco .portal-page-heading > div:last-child,
+.portal-water .portal-page-heading > div:last-child {
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.portal-resident [role="alert"],
+.portal-cepalco [role="alert"],
+.portal-water [role="alert"] {
+  overflow-wrap: anywhere;
+}
+
+.portal-resident .resident-advisory-tools input,
+.portal-resident .resident-advisory-tools select,
+.portal-cepalco .cepalco-toolbar input,
+.portal-cepalco .cepalco-toolbar select,
+.portal-water .water-search input {
+  min-width: 0;
+  max-width: 100%;
+}
+
+@media (max-width: 760px) {
+  .portal-resident .portal-header,
+  .portal-cepalco .portal-header,
+  .portal-water .portal-header {
+    padding-inline: 14px;
+  }
+
+  .portal-resident .portal-layout,
+  .portal-cepalco .portal-layout,
+  .portal-water .portal-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+    padding-inline: 14px;
+  }
+
+  .portal-resident .portal-page-heading,
+  .portal-cepalco .portal-page-heading,
+  .portal-water .portal-page-heading {
+    align-items: flex-start;
+  }
+
+  .portal-resident .portal-page-heading > div:last-child,
+  .portal-cepalco .portal-page-heading > div:last-child,
+  .portal-water .portal-page-heading > div:last-child {
+    width: 100%;
+  }
+
+  .portal-resident .resident-advisory-tools > div,
+  .portal-cepalco .cepalco-toolbar {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 420px) {
+  .portal-resident .portal-header,
+  .portal-cepalco .portal-header,
+  .portal-water .portal-header {
+    gap: 8px;
+    padding-inline: 10px;
+  }
+
+  .portal-resident .portal-layout,
+  .portal-cepalco .portal-layout,
+  .portal-water .portal-layout {
+    padding-inline: 10px;
+  }
+
+  .portal-resident .portal-page-heading h1,
+  .portal-cepalco .portal-page-heading h1,
+  .portal-water .portal-page-heading h1 {
+    font-size: 1.4rem;
+  }
+}
+
+/* Shared dark theme for every authenticated portal role. */
+.portal-dark {
+  color-scheme: dark;
+  background: #0f172a !important;
+  color: #e2e8f0;
+}
+
+.portal-dark .bg-white,
+.portal-dark .bg-slate-50,
+.portal-dark .bg-gray-50,
+.portal-dark .bg-slate-100,
+.portal-dark .bg-gray-100,
+.portal-dark .cepalco-form-card,
+.portal-dark .cepalco-card,
+.portal-dark .water-form-card,
+.portal-dark .water-advisory-card,
+.portal-dark .water-report-card,
+.portal-dark .resident-profile-card,
+.portal-dark .resident-workspace article,
+.portal-dark .water-overview article {
+  background-color: #1e293b !important;
+}
+
+.portal-dark .bg-rose-50,
+.portal-dark .bg-emerald-50,
+.portal-dark .bg-amber-50,
+.portal-dark .bg-sky-50,
+.portal-dark .bg-blue-50 {
+  background-color: #263449 !important;
+}
+
+.portal-dark .active-nav {
+  color: #fecdd3 !important;
+  background-color: #3b2d3d !important;
+}
+
+.portal-dark .text-amber-950,
+.portal-dark .text-amber-900,
+.portal-dark .text-rose-900,
+.portal-dark .text-emerald-900 {
+  color: #f1f5f9 !important;
+}
+
+.portal-dark .text-slate-900,
+.portal-dark .text-slate-800,
+.portal-dark .text-gray-900,
+.portal-dark .text-gray-800,
+.portal-dark .cepalco-publish-top h2,
+.portal-dark .water-publish-top h2 {
+  color: #f1f5f9 !important;
+}
+
+.portal-dark .text-slate-700,
+.portal-dark .text-slate-600,
+.portal-dark .text-slate-500,
+.portal-dark .text-gray-700,
+.portal-dark .text-gray-600,
+.portal-dark .text-gray-500 {
+  color: #cbd5e1 !important;
+}
+
+.portal-dark .border-slate-200,
+.portal-dark .border-slate-300,
+.portal-dark .border-gray-200,
+.portal-dark .border-gray-300,
+.portal-dark .cepalco-form-card,
+.portal-dark .cepalco-card,
+.portal-dark .water-form-card,
+.portal-dark .water-advisory-card,
+.portal-dark .water-report-card,
+.portal-dark .resident-profile-card,
+.portal-dark .resident-workspace article,
+.portal-dark .water-overview article {
+  border-color: #334155 !important;
+}
+
+.portal-dark input:not([type="checkbox"]):not([type="radio"]),
+.portal-dark textarea,
+.portal-dark select {
+  color-scheme: dark;
+  background-color: #0f172a;
+  border-color: #475569;
+  color: #e2e8f0;
+}
+
+.portal-dark input::placeholder,
+.portal-dark textarea::placeholder {
+  color: #94a3b8;
+}
+
+.portal-dark .portal-header,
+.portal-dark .portal-sidebar,
+.portal-dark .portal-page-heading,
+.portal-dark .water-publish-top,
+.portal-dark .water-publish-footer,
+.portal-dark .cepalco-publish-top,
+.portal-dark .cepalco-publish-footer {
+  border-color: #334155;
+}
+
+.portal-dark .portal-header button:not([class*="bg-"]),
+.portal-dark .portal-page-heading button:not([class*="bg-"]) {
+  border-color: #475569;
+  color: #e2e8f0;
+}
+
+.portal-dark .portal-header button:not([class*="bg-"]):hover,
+.portal-dark .portal-page-heading button:not([class*="bg-"]):hover {
+  background-color: #334155;
+}
+
+.portal-dark .water-publish-top button:not(.water-primary),
+.portal-dark .water-publish-footer button:not(.water-primary) {
+  color: #e2e8f0;
+  background: #1e293b;
+  border-color: #475569;
+}
+
+.portal-dark .water-publish-top button:not(.water-primary):hover,
+.portal-dark .water-publish-footer button:not(.water-primary):hover {
+  background: #334155;
+}
+
+.portal-notification {
+  animation: portal-notification-enter 180ms ease-out;
+}
+
+.portal-dark .portal-notification {
+  background-color: #1e293b !important;
+  border-color: #334155 !important;
+  color: #e2e8f0;
+}
+
+.portal-dark .portal-notification .text-slate-900 {
+  color: #f1f5f9 !important;
+}
+
+.portal-dark .portal-notification .text-slate-600 {
+  color: #cbd5e1 !important;
+}
+
+@keyframes portal-notification-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -8px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .portal-notification {
+    animation: none;
   }
 }
