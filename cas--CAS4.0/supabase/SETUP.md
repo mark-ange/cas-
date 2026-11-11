@@ -14,7 +14,8 @@ The portals use Supabase Auth and Supabase tables for sign-in and application re
 6. Run `migrations/20261109001000_advisory_statuses.sql` to normalize existing notices to Scheduled, Active, Resolved, or Cancelled.
 7. Run `migrations/20261109002000_resident_purok_profile.sql` to store each resident's selected Purok separately in their service-location profile.
 8. Run `migrations/20261111000200_advisory_area_locations.sql` to store all selected advisory-area map pins. This migration is required before publishing or scheduling multi-Purok advisories.
-9. Create each utility administrator through **Authentication → Users**. Do not set `role` or `utility` in user metadata. Assign roles to accounts you control:
+9. Run `migrations/20261111000300_relational_service_areas.sql` to add the barangay/Purok catalog, link resident profiles to those records, and save advisory affected areas as relational links. This migration is required for area-targeted resident counts and notifications. Residents with no saved Purok are excluded from Purok-specific alerts until their profile location is complete.
+10. Create each utility administrator through **Authentication → Users**. Do not set `role` or `utility` in user metadata. Assign roles to accounts you control:
 
    ```sql
    update public.profiles

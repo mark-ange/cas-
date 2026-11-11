@@ -24,7 +24,9 @@ export type SupabaseProfile = {
   phone_number: string | null;
   address: string | null;
   barangay: string | null;
+  barangay_id: number | null;
   purok: string | null;
+  purok_id: number | null;
   district: string | null;
   city: string | null;
   postal_code: string | null;

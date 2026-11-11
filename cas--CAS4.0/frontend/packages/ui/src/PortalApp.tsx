@@ -832,7 +832,7 @@ function ResidentAuth({ onLogin, onRegister, error, busy }: { onLogin: (event: F
                     <label className={labelClass}>
                       Purok <span className="font-normal normal-case text-slate-500">(optional)</span>
                       <PurokDropdown name="purok" className={`${inputClass} mt-1.5`} />
-                      <small className="mt-1 block text-[11px] font-normal text-slate-500">Your service location is kept in your profile; utility announcements are sent to all residents.</small>
+                      <small className="mt-1 block text-[11px] font-normal text-slate-500">Your linked barangay and Purok determine which area-specific alerts you receive.</small>
                     </label>
 
                     <div className="grid gap-3 sm:grid-cols-2">
@@ -1336,11 +1336,17 @@ function App({ portal }: { portal: Portal }) {
         longitude: number;
       }>;
       const informationUrl = String(form.get("informationUrl") || "").trim();
-      const estimate = await localAction<{ emailRecipients: number }>(portal, "/advisories/recipient-estimate", token);
+      const estimate = await localAction<{ emailRecipients: number }>(portal, "/advisories/recipient-estimate", token, {
+        method: "POST",
+        body: JSON.stringify({
+          areas,
+          city: settingsFor("resident").locationDefaults?.city ?? "Cagayan de Oro City",
+        }),
+      });
       const scheduledAtInput = String(form.get("scheduledAt") || "");
       const publishTime = scheduledAtInput ? `Scheduled for ${formatResidentDateTime(new Date(scheduledAtInput).toISOString())}` : "Publish immediately";
       const audience = [
-        selectedChannels.includes("gmail") ? `Gmail: ${estimate.emailRecipients} registered residents across all areas` : null,
+        selectedChannels.includes("gmail") ? `Gmail: ${estimate.emailRecipients} residents in the selected affected areas` : null,
         selectedChannels.includes("facebook") ? "Facebook: official utility page" : null,
         selectedChannels.includes("instagram") ? "Instagram: official utility account" : null,
       ].filter(Boolean).join("\n");
@@ -1356,7 +1362,7 @@ function App({ portal }: { portal: Portal }) {
         `Description: ${String(form.get("details") || "(Not provided)")}`,
         ...(informationUrl ? [`More information: ${informationUrl}`] : []),
       ].join("\n");
-      const preview = `Review ${portal === "water" ? "Water District" : "CEPALCO"} advisory\n\n${String(form.get("title") || "(No headline)")}\n${noticePreview}\nAudience: all registered residents\n\n${publishTime}\nChannels:\n${audience}\n\nConfirm to save and publish this advisory.`;
+      const preview = `Review ${portal === "water" ? "Water District" : "CEPALCO"} advisory\n\n${String(form.get("title") || "(No headline)")}\n${noticePreview}\nResident email and inbox alerts: ${estimate.emailRecipients} residents whose saved locations match the affected Purok/Zone areas. Social posts are public.\n\n${publishTime}\nChannels:\n${audience}\n\nConfirm to save and publish this advisory.`;
       if (!await requestPublishConfirmation(preview)) return;
       const published = await localAction<{
         id: number;
@@ -1374,6 +1380,8 @@ function App({ portal }: { portal: Portal }) {
           area,
           areas,
           areaLocations,
+          barangay: form.get("barangay"),
+          city: settingsFor("resident").locationDefaults?.city ?? "Cagayan de Oro City",
           type: form.get("category"),
           location: form.get("location"),
           serviceStatus: form.get("serviceStatus"),
@@ -1774,7 +1782,7 @@ function ResidentProfile({ actor, selectedImage, saving, onImageChange, onSave, 
         <div className="grid gap-4 sm:grid-cols-2">
           <label className={`${labelClass} sm:col-span-2`}>{copy("copy_432d86cc06aa")}<input name="address" maxLength={240} defaultValue={actor.address || ""} autoComplete="street-address" className={fieldClass} /><span className="mt-1 block text-xs font-normal text-slate-500">Include your purok in this address if applicable; notices use it to refine area matching.</span></label>
           <label className={labelClass}>{copy("copy_ad1315f3e999")}<ServiceAreaDropdown name="barangay" required defaultValue={actor.barangay || ""} autoComplete="address-level3" className={fieldClass} /></label>
-          <label className={labelClass}>Purok (optional)<PurokDropdown name="purok" defaultValue={actor.purok || ""} className={fieldClass} /><span className="mt-1 block text-xs font-normal text-slate-500">Your service location is kept in your profile; utility announcements are sent to all residents.</span></label>
+          <label className={labelClass}>Purok (optional)<PurokDropdown name="purok" defaultValue={actor.purok || ""} className={fieldClass} /><span className="mt-1 block text-xs font-normal text-slate-500">Your linked barangay and Purok determine which area-specific alerts you receive.</span></label>
           <label className={labelClass}>{copy("copy_ac3506fe618c")}<input name="postalCode" maxLength={20} defaultValue={actor.postalCode || ""} autoComplete="postal-code" className={fieldClass} /></label>
           <label className={labelClass}>{copy("copy_c4473f4e49d0")}<DistrictDropdown name="district" defaultValue={actor.district || ""} className={fieldClass} /></label>
           <label className={labelClass}>{copy("copy_1f15f6d9f6b5")}<input name="city" maxLength={100} defaultValue={actor.city || ""} autoComplete="address-level2" className={fieldClass} /></label>
@@ -2191,7 +2199,7 @@ function StandardAnnouncementCard({
       </div>
       <h2>{item.title}</h2>
       <p className="standard-announcement-area">{item.reference} · {item.area}</p>
-      {resident && <span className="standard-announcement-match matched">Audience: all residents</span>}
+      {resident && <span className="standard-announcement-match matched">Audience: residents in affected areas</span>}
       <dl className="my-3 grid gap-1.5 rounded-lg bg-slate-50 p-3 text-xs text-slate-700 sm:grid-cols-2">
         <div><dt className="inline font-semibold">Location: </dt><dd className="inline">{item.location || item.area}</dd></div>
         <div><dt className="inline font-semibold">Type of Service: </dt><dd className="inline">{item.type}</dd></div>
@@ -2456,7 +2464,7 @@ function WaterPublishForm({ portal, busy, token, onCancel, onSubmit }: { portal:
       <label><span>Priority</span><select name="priority" defaultValue={readAnnouncementDraftValue(portal, "priority") || (isWater ? "Urgent" : "High")} onChange={() => setDraftSaved(false)}>{priorities.map(priority => <option key={priority}>{priority}</option>)}</select></label>
     </section>
     <section className="water-form-card">
-      <div><h3>What is happening?</h3><p>Give the update a short title. It will be shared with all residents.</p></div>
+      <div><h3>What is happening?</h3><p>Give the update a short title for residents in the affected Purok/Zone areas.</p></div>
       <label><span>Advisory headline</span><input name="title" required maxLength={160} defaultValue={readAnnouncementDraftValue(portal, "title")} onChange={() => setDraftSaved(false)} placeholder="Summarize the service update" /></label>
       <label><span>Barangay and city</span><select name="location" required value={selectedAddress} onChange={event => { setSelectedAddress(event.target.value); setSelectedZones([]); setSelectedLocations([]); setMapPinError(""); setDraftSaved(false); }} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-3 text-sm font-normal text-slate-800"><option value="">Select a barangay</option>{serviceAreas.map(area => { const location = `${area}, ${city}`; return <option key={area} value={location}>{location}</option>; })}</select></label>
       <div><span className="mb-1.5 block text-sm font-medium">Affected Purok / Zone</span><PurokZoneMultiSelect selectedZones={selectedZones} onChange={zones => { setSelectedZones(zones); setSelectedLocations([]); setMapPinError(""); setDraftSaved(false); }} /><small className="mt-1 block text-xs text-slate-500">{selectedBarangay ? `Select the affected Purok/Zone within ${selectedBarangay}.` : "Select a barangay first."}</small></div>

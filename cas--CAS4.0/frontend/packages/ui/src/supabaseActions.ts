@@ -2,7 +2,7 @@ import type { Advisory, Portal, ServiceReport, SMSRecord, Status, WorkOrder } fr
 import { getSupabase, profileActor, raiseSupabaseError, type SupabaseProfile } from "./supabase.js";
 
 type ActionOptions = RequestInit;
-const PROFILE_COLUMNS = "id,name,email,role,utility,phone_number,address,barangay,purok,district,city,postal_code,profile_image,sms_alerts,notify_maintenance,notify_email_digest,immediate_email_alerts";
+const PROFILE_COLUMNS = "id,name,email,role,utility,phone_number,address,barangay,barangay_id,purok,purok_id,district,city,postal_code,profile_image,sms_alerts,notify_maintenance,notify_email_digest,immediate_email_alerts";
 
 function toCamel(row: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(row).map(([key, value]) => [
@@ -14,6 +14,61 @@ function toCamel(row: Record<string, unknown>): Record<string, unknown> {
 function isMissingAreaLocationsColumn(error: { code?: string; message?: string }): boolean {
   return (error.code === "42703" || error.code === "PGRST204") &&
     /area_locations/i.test(error.message ?? "");
+}
+
+function serviceAreaMigrationError(): Error {
+  return new Error("Apply supabase/migrations/20261111000300_relational_service_areas.sql to enable linked barangay/Purok records.");
+}
+
+async function serviceLocationIds(
+  supabase: ReturnType<typeof getSupabase>,
+  cityValue: unknown,
+  barangayValue: unknown,
+  purokValue: unknown,
+): Promise<{ barangayId: number; purokId: number | null }> {
+  const city = typeof cityValue === "string" ? cityValue.trim() : "";
+  const barangay = typeof barangayValue === "string" ? barangayValue.trim() : "";
+  if (!city || !barangay) throw new Error("Select a city and barangay before saving the service location.");
+  const { data: barangayRow, error: barangayError } = await supabase.from("barangays")
+    .select("id").ilike("name", barangay).ilike("city", city).maybeSingle();
+  if (barangayError) {
+    if (barangayError.code === "42P01" || barangayError.code === "PGRST205") throw serviceAreaMigrationError();
+    throw new Error(barangayError.message);
+  }
+  if (!barangayRow) throw new Error("The selected barangay is not in the service-area catalog.");
+  const purok = typeof purokValue === "string" ? purokValue.trim() : "";
+  if (!purok) return { barangayId: Number(barangayRow.id), purokId: null };
+  const purokName = /^Purok\s/i.test(purok) ? purok : `Purok ${purok}`;
+  const { data: purokRow, error: purokError } = await supabase.from("puroks")
+    .select("id").eq("barangay_id", barangayRow.id).ilike("name", purokName).maybeSingle();
+  if (purokError) {
+    if (purokError.code === "42P01" || purokError.code === "PGRST205") throw serviceAreaMigrationError();
+    throw new Error(purokError.message);
+  }
+  if (!purokRow) throw new Error("The selected Purok/Zone is not in this barangay's service-area catalog.");
+  return { barangayId: Number(barangayRow.id), purokId: Number(purokRow.id) };
+}
+
+async function advisoryPurokIds(
+  supabase: ReturnType<typeof getSupabase>,
+  areaLabels: unknown,
+  city: unknown,
+): Promise<Array<{ area: string; purokId: number }>> {
+  if (!Array.isArray(areaLabels) || !areaLabels.length) throw new Error("Choose at least one affected Purok/Zone.");
+  const result: Array<{ area: string; purokId: number }> = [];
+  for (const value of areaLabels) {
+    if (typeof value !== "string") throw new Error("An affected service area is invalid.");
+    const [barangay, zone, ...extra] = value.split(" · ");
+    const match = zone?.match(/^Purok (10|[1-9])$/);
+    if (!barangay || !match || extra.length) throw new Error(`Invalid affected Purok/Zone: ${value}`);
+    const { barangayId, purokId } = await serviceLocationIds(supabase, city, barangay, match[1]);
+    if (purokId === null) throw new Error(`Select a valid Purok/Zone for ${barangay}.`);
+    result.push({ area: value, purokId });
+  }
+  if (new Set(result.map(item => item.purokId)).size !== result.length) {
+    throw new Error("Remove duplicate affected Purok/Zone selections.");
+  }
+  return result;
 }
 
 function advisoryFromRow(row: Record<string, unknown>): Advisory {
@@ -154,12 +209,15 @@ export async function supabaseAction<T>(
     if (!data.user || !data.session) {
       throw new Error("Check your email to confirm your account, then sign in. If confirmation is disabled, check the Supabase Auth settings.");
     }
+    const serviceArea = await serviceLocationIds(supabase, body.city, body.barangay, body.purok);
     const { error: profileError } = await supabase.from("profiles").update({
       name: String(body.name ?? "").trim(),
       phone_number: String(body.phoneNumber ?? ""),
       address: String(body.address ?? ""),
       barangay: String(body.barangay ?? ""),
+      barangay_id: serviceArea.barangayId,
       purok: String(body.purok ?? "") || null,
+      purok_id: serviceArea.purokId,
       district: String(body.district ?? ""),
       city: String(body.city ?? ""),
       postal_code: String(body.postalCode ?? ""),
@@ -180,12 +238,20 @@ export async function supabaseAction<T>(
     if (typeof body.email === "string" && body.email.trim().toLowerCase() !== profile.email.toLowerCase()) {
       throw new Error("Changing your email is not supported from this profile form. Keep the email connected to your Supabase Auth account.");
     }
+    const serviceArea = await serviceLocationIds(
+      supabase,
+      body.city ?? profile.city,
+      body.barangay ?? profile.barangay,
+      body.purok ?? profile.purok,
+    );
     const { error } = await supabase.from("profiles").update({
       name: body.name,
       phone_number: body.phoneNumber,
       address: body.address,
       barangay: body.barangay,
+      barangay_id: serviceArea.barangayId,
       purok: body.purok || null,
+      purok_id: serviceArea.purokId,
       district: body.district,
       city: body.city,
       postal_code: body.postalCode,
@@ -215,6 +281,7 @@ export async function supabaseAction<T>(
 
   if (path === "/advisories" && method === "GET") {
     const links = new Map<number, Record<string, string>>();
+    const areaLocations = new Map<number, Array<{ area: string; latitude: number; longitude: number }>>();
     const advisories: Record<string, unknown>[] = [];
     const pageSize = 100;
     for (let from = 0; ; from += pageSize) {
@@ -240,20 +307,40 @@ export async function supabaseAction<T>(
       advisories.push(...rows);
       const ids = rows.map(row => Number(row.id));
       if (ids.length) {
-        const { data: posts, error: postError } = await supabase.from("social_posts")
-          .select("advisory_id,platform,permalink_url")
-          .in("advisory_id", ids);
+        const [{ data: posts, error: postError }, { data: serviceAreas, error: areaError }] = await Promise.all([
+          supabase.from("social_posts")
+            .select("advisory_id,platform,permalink_url")
+            .in("advisory_id", ids),
+          supabase.from("advisory_areas")
+            .select("advisory_id,latitude,longitude,puroks(name,barangays(name))")
+            .in("advisory_id", ids),
+        ]);
         if (postError) throw new Error(postError.message);
+        if (areaError && areaError.code !== "42P01" && areaError.code !== "PGRST205") {
+          throw new Error(areaError.message);
+        }
         for (const post of posts ?? []) {
           const existing = links.get(post.advisory_id) ?? {};
           existing[post.platform] = post.permalink_url ?? "";
           links.set(post.advisory_id, existing);
+        }
+        for (const row of serviceAreas ?? []) {
+          const purok = row.puroks as unknown as { name?: string; barangays?: { name?: string } } | null;
+          if (!purok?.name || !purok.barangays?.name) continue;
+          const locations = areaLocations.get(row.advisory_id) ?? [];
+          locations.push({
+            area: `${purok.barangays.name} · ${purok.name}`,
+            latitude: row.latitude,
+            longitude: row.longitude,
+          });
+          areaLocations.set(row.advisory_id, locations);
         }
       }
       if (rows.length < pageSize) break;
     }
     return advisories.map(row => ({
       ...advisoryFromRow(row),
+      areaLocations: areaLocations.get(Number(row.id)) ?? advisoryFromRow(row).areaLocations,
       facebookUrl: links.get(Number(row.id))?.facebook || null,
       instagramUrl: links.get(Number(row.id))?.instagram || null,
     })) as Advisory[] as T;
@@ -262,6 +349,22 @@ export async function supabaseAction<T>(
   if (path === "/advisories" && method === "POST") {
     await profileForPortal();
     const scheduledAt = String(body.scheduledAt ?? "") || null;
+    const affectedPuroks = await advisoryPurokIds(supabase, body.areas, body.city);
+    const areaRows = affectedPuroks.map(item => {
+      const location = Array.isArray(body.areaLocations)
+        ? body.areaLocations.find((entry: unknown) =>
+            entry && typeof entry === "object" && "area" in entry && entry.area === item.area,
+          ) as { latitude?: number; longitude?: number } | undefined
+        : undefined;
+      if (!location || !Number.isFinite(location.latitude) || !Number.isFinite(location.longitude)) {
+        throw new Error(`A valid map location is required for ${item.area}.`);
+      }
+      return {
+        purok_id: item.purokId,
+        latitude: location.latitude,
+        longitude: location.longitude,
+      };
+    });
     const advisoryPayload = {
       reference: `${portal === "water" ? "WD" : "CE"}-${Date.now().toString(36).toUpperCase()}`,
       title: body.title,
@@ -292,6 +395,15 @@ export async function supabaseAction<T>(
       throw new Error("Supabase is missing the area_locations column. Apply supabase/migrations/20261111000200_advisory_area_locations.sql before publishing multi-area advisories.");
     }
     if (error) throw new Error(error.message);
+    const { error: areaInsertError } = await supabase.from("advisory_areas").insert(
+      areaRows.map(row => ({ advisory_id: data.id, ...row })),
+    );
+    if (areaInsertError) {
+      const { error: cleanupError } = await supabase.from("advisories").delete().eq("id", data.id);
+      if (cleanupError) console.error("Could not remove advisory after its area links failed to save:", cleanupError);
+      if (areaInsertError.code === "42P01" || areaInsertError.code === "PGRST205") throw serviceAreaMigrationError();
+      throw new Error(areaInsertError.message);
+    }
     await recordActivity(scheduledAt ? "Advisory scheduled" : "Advisory prepared", Number(data.id), `${String(body.title)} — ${String(body.area)}; channels: ${(body.channels as string[] | undefined)?.join(", ") ?? "none"}.`);
     let delivery: Record<string, unknown> | null = null;
     {

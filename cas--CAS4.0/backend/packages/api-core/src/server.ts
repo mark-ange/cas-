@@ -30,8 +30,13 @@ type ResidentProfile = {
   utility: null;
   phone_number: string | null;
   sms_alerts: boolean;
+  barangay_id: number | null;
+  purok_id: number | null;
+  barangay: string | null;
+  purok: string | null;
 };
 type EmailRecipient = Pick<ResidentProfile, "name" | "email">;
+type TargetServiceArea = { id: number; barangay_id: number };
 const utilities: Record<Exclude<Portal, "resident">, string> = { cepalco: "CEPALCO", water: "Water District" };
 const notificationChannels = ["facebook", "instagram", "gmail", "sms"] as const;
 type NotificationChannel = typeof notificationChannels[number];
@@ -88,15 +93,15 @@ async function syncResidentProfiles(supabase: ReturnType<typeof supabaseAdmin>) 
       .get(resident.email) as { id: number } | undefined;
     if (existing) {
       database.prepare(`
-        UPDATE users SET name=?,email=?,phone_number=?,sms_alerts=? WHERE id=?
-      `).run(resident.name, resident.email, resident.phone_number, Number(resident.sms_alerts), existing.id);
+        UPDATE users SET name=?,email=?,phone_number=?,sms_alerts=?,barangay=?,purok=? WHERE id=?
+      `).run(resident.name, resident.email, resident.phone_number, Number(resident.sms_alerts), resident.barangay, resident.purok, existing.id);
     } else {
       database.prepare(`
-        INSERT INTO users (name,email,password_hash,role,utility,phone_number,sms_alerts)
-        VALUES (?,?,?,'resident',NULL,?,?)
+        INSERT INTO users (name,email,password_hash,role,utility,phone_number,sms_alerts,barangay,purok)
+        VALUES (?,?,?,'resident',NULL,?,?,?,?)
       `).run(
         resident.name, resident.email, hashPassword(randomBytes(32).toString("hex")),
-        resident.phone_number, Number(resident.sms_alerts),
+        resident.phone_number, Number(resident.sms_alerts), resident.barangay, resident.purok,
       );
     }
   }
@@ -108,7 +113,7 @@ async function residentProfilesFromSupabase(supabase: ReturnType<typeof supabase
   const pageSize = 1000;
   for (let offset = 0; ; offset += pageSize) {
     const { data, error } = await supabase.from("profiles")
-      .select("id,name,email,role,utility,phone_number,sms_alerts")
+      .select("id,name,email,role,utility,phone_number,sms_alerts,barangay_id,purok_id,barangay,purok")
       .eq("role", "resident")
       .order("id")
       .range(offset, offset + pageSize - 1);
@@ -117,6 +122,116 @@ async function residentProfilesFromSupabase(supabase: ReturnType<typeof supabase
     if ((data ?? []).length < pageSize) break;
   }
   return residents;
+}
+
+async function serviceAreasByLabels(
+  supabase: ReturnType<typeof supabaseAdmin>,
+  value: unknown,
+  cityValue: unknown,
+): Promise<TargetServiceArea[]> {
+  const areas = parseAnnouncementAreas(value, "");
+  const labels = areas.map(area => {
+    const match = area.match(/^(.+?)\s+·\s+Purok\s+(10|[1-9])$/i);
+    if (!match) throw new Error("Choose an affected Purok/Zone for each announcement area.");
+    return { label: area, barangay: match[1], purok: `Purok ${match[2]}` };
+  });
+  const city = typeof cityValue === "string" ? cityValue.trim() : "";
+  if (!city) throw new Error("Select a city before estimating affected-area recipients.");
+  const { data: catalog, error } = await supabase.from("puroks")
+    .select("id,name,barangay_id,barangays(city,name)")
+    .in("name", [...new Set(labels.map(item => item.purok))]);
+  if (error) {
+    if (error.code === "42P01" || error.code === "PGRST205") {
+      throw new Error("Apply the relational service-area migration before targeting residents by affected area.");
+    }
+    throw error;
+  }
+  const resolved = labels.map(label => {
+    const row = (catalog ?? []).find(item => {
+      const barangay = item.barangays as unknown as { city?: string; name?: string } | null;
+      return item.name.toLocaleLowerCase() === label.purok.toLocaleLowerCase() &&
+        barangay?.city?.toLocaleLowerCase() === city.toLocaleLowerCase() &&
+        barangay?.name?.toLocaleLowerCase() === label.barangay.toLocaleLowerCase();
+    });
+    if (!row) throw new Error(`Affected area ${label.label} is not in the service-area catalog.`);
+    return { id: Number(row.id), barangay_id: Number(row.barangay_id) };
+  });
+  return resolved;
+}
+
+function residentsForServiceAreas(
+  residents: ResidentProfile[],
+  areas: TargetServiceArea[],
+): ResidentProfile[] {
+  return residents.filter(resident => areas.some(area =>
+    resident.barangay_id === area.barangay_id &&
+    resident.purok_id === area.id,
+  ));
+}
+
+async function advisoryServiceAreas(
+  supabase: ReturnType<typeof supabaseAdmin>,
+  advisoryId: number,
+): Promise<TargetServiceArea[]> {
+  const { data, error } = await supabase.from("advisory_areas")
+    .select("purok_id,puroks(barangay_id)")
+    .eq("advisory_id", advisoryId);
+  if (error) {
+    if (error.code === "42P01" || error.code === "PGRST205") {
+      throw new Error("Apply the relational service-area migration before targeting residents by affected area.");
+    }
+    throw error;
+  }
+  return (data ?? []).flatMap(row => {
+    const purok = row.puroks as unknown as { barangay_id?: number } | null;
+    return typeof row.purok_id === "number" && typeof purok?.barangay_id === "number"
+      ? [{ id: row.purok_id, barangay_id: purok.barangay_id }]
+      : [];
+  });
+}
+
+async function scheduledRecipients(
+  supabase: ReturnType<typeof supabaseAdmin>,
+  reference: string,
+): Promise<ResidentProfile[]> {
+  const { data: advisory, error } = await supabase.from("advisories").select("id").eq("reference", reference).maybeSingle();
+  if (error) throw error;
+  if (!advisory) throw new Error(`Scheduled advisory ${reference} was not found in Supabase.`);
+  const areas = await advisoryServiceAreas(supabase, Number(advisory.id));
+  if (!areas.length) throw new Error(`Scheduled advisory ${reference} has no linked affected areas.`);
+  return residentsForServiceAreas(await syncResidentProfiles(supabase), areas);
+}
+
+function localResidentsForAreas(areaLabels: string[]): Array<ResidentProfile & { localId: number }> {
+  const areas = areaLabels.flatMap(label => {
+    const match = label.match(/^(.+?)\s+·\s+Purok\s+(10|[1-9])$/i);
+    return match ? [{ barangay: match[1].toLocaleLowerCase(), purok: match[2] }] : [];
+  });
+  const residents = database.prepare(`
+    SELECT id, name, email, phone_number, sms_alerts, barangay, purok
+    FROM users WHERE role = 'resident'
+  `).all() as Array<{
+    id: number; name: string; email: string; phone_number: string | null;
+    sms_alerts: number; barangay: string | null; purok: string | null;
+  }>;
+  return residents.flatMap(resident => {
+    const target = areas.some(area =>
+      resident.barangay?.trim().toLocaleLowerCase() === area.barangay &&
+      resident.purok?.replace(/^Purok\s+/i, "").trim() === area.purok,
+    );
+    return target ? [{
+      ...resident,
+      localId: resident.id,
+      id: String(resident.id),
+      role: "resident" as const,
+      utility: null,
+      barangay_id: null,
+      purok_id: null,
+      barangay: resident.barangay,
+      purok: resident.purok,
+      sms_alerts: Boolean(resident.sms_alerts),
+    }] : [];
+  });
 }
 
 function required(value: unknown, name: string): string {
@@ -238,10 +353,17 @@ function normalizeResidentPurok(value: unknown): string | null {
   return purok;
 }
 
-function createSimulatedSms(advisoryId: number): number {
-  const recipients = database.prepare(`
-    SELECT id FROM users WHERE role = 'resident'
-  `).all() as Array<{ id: number }>;
+function createSimulatedSms(advisoryId: number, recipientProfiles?: EmailRecipient[]): number {
+  const recipients = recipientProfiles === undefined
+    ? database.prepare("SELECT id FROM users WHERE role = 'resident'").all() as Array<{ id: number }>
+    : recipientProfiles.flatMap(profile => {
+        const resident = database.prepare(`
+          SELECT id FROM users
+          WHERE role = 'resident' AND lower(trim(email)) = lower(trim(?))
+          LIMIT 1
+        `).get(profile.email) as { id: number } | undefined;
+        return resident ? [resident] : [];
+      });
   const insert = database.prepare("INSERT OR IGNORE INTO sms_deliveries (advisory_id, resident_id) VALUES (?, ?)");
   let queued = 0;
   for (const recipient of recipients) {
@@ -339,7 +461,7 @@ async function publishSelectedChannels(
   const emailDelivery = channels.includes("gmail")
     ? await deliverAdvisoryEmails(portal, utility, advisory.id, advisory.reference, advisory.title, advisory.area, noticeDetails, advisory.imageDataUrls, false, socialLinks, recipientProfiles)
     : null;
-  const smsQueued = createSimulatedSms(advisory.id);
+  const smsQueued = createSimulatedSms(advisory.id, recipientProfiles);
   return { emailDelivery, socialDelivery, socialLinks: socialLinksForAdvisory(advisory.id), smsQueued };
 }
 
@@ -731,21 +853,17 @@ export function createApi(portal: Portal) {
     });
   } else {
     const utility = utilities[portal];
-    app.get("/advisories/recipient-estimate", requireUtility(utility), async (_req, res) => {
+    app.post("/advisories/recipient-estimate", requireUtility(utility), async (req, res) => {
       try {
         const supabase = supabaseAdmin();
-        const [emailCountResult, smsCountResult] = await Promise.all([
-          supabase.from("profiles").select("id", { count: "exact", head: true }).eq("role", "resident"),
-          supabase.from("profiles").select("id", { count: "exact", head: true }).eq("role", "resident"),
-        ]);
-        if (emailCountResult.error) throw emailCountResult.error;
-        if (smsCountResult.error) throw smsCountResult.error;
-        const emailRecipients = emailCountResult.count ?? 0;
-        const smsRecipients = smsCountResult.count ?? 0;
+        const areas = await serviceAreasByLabels(supabase, req.body?.areas, req.body?.city);
+        const residents = residentsForServiceAreas(await residentProfilesFromSupabase(supabase), areas);
+        const emailRecipients = residents.filter(resident => resident.email).length;
+        const smsRecipients = residents.length;
         return res.json({
           emailRecipients,
           smsRecipients,
-          totalResidentAccounts: emailRecipients,
+          totalResidentAccounts: residents.length,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Could not estimate recipients.";
@@ -796,6 +914,10 @@ export function createApi(portal: Portal) {
                 advisory.longitude !== null && advisory.longitude !== undefined
               ? [{ area, latitude: Number(advisory.latitude), longitude: Number(advisory.longitude) }]
               : [];
+        const targetAreas = await advisoryServiceAreas(supabase, advisoryId);
+        if (targetAreas.length === 0) {
+          throw new Error("This advisory has no linked affected areas. Save its affected Purok/Zone links before delivering.");
+        }
         const imageDataUrls = readStoredAnnouncementImages(advisory.image_data_url);
         if (imageDataUrls.length === 0 && channels.some(channel => ["facebook", "instagram", "gmail"].includes(channel))) {
           return res.status(400).json({ error: "Add an announcement image before publishing to Facebook, Instagram, or Gmail." });
@@ -830,7 +952,7 @@ export function createApi(portal: Portal) {
         // The utility-specific worker will deliver them when their schedule becomes due.
         if (advisory.publication_status === "scheduled") return res.json({ scheduled: true });
 
-        const residents = await syncResidentProfiles(supabase);
+        const residents = residentsForServiceAreas(await syncResidentProfiles(supabase), targetAreas);
         const delivery = await publishSelectedChannels(portal, utility, {
           id: localAdvisoryId,
           reference: advisory.reference,
@@ -977,10 +1099,13 @@ export function createApi(portal: Portal) {
         if (!scheduledAt && supabaseConfigured()) {
           await syncResidentProfiles(supabaseAdmin());
         }
+        const areaTargetedRecipients = areas.length && areas.every(area => /^.+ · Purok (10|[1-9])$/i.test(area))
+          ? localResidentsForAreas(areas)
+          : undefined;
         const delivery = scheduledAt ? null : await publishSelectedChannels(portal, utility, {
           id, reference, title, type, location, serviceStatus, area, serviceStartsAt,
           estimatedRestorationAt, provider, details, imageDataUrls,
-        }, deliveryChannels);
+        }, deliveryChannels, areaTargetedRecipients);
 
         return res.status(201).json({
           id, reference, title, utility, type, area, areas, areaLocations, status, details, location, serviceStatus, provider, priority, serviceStartsAt, estimatedRestorationAt, latitude, longitude,
@@ -1009,7 +1134,7 @@ export function createApi(portal: Portal) {
       // ADDED: Fetch the saved image too, so retrying a failed email preserves its attachment.
       const advisory = database.prepare(`
         SELECT id, reference, title, type, area, details, location, service_status, provider,
-          service_starts_at, estimated_restoration_at, image_data_url
+          service_starts_at, estimated_restoration_at, image_data_url, area_locations_json
         FROM advisories WHERE id = ? AND utility = ?
       `).get(Number(req.params.id), utility) as {
         id: number;
@@ -1024,12 +1149,17 @@ export function createApi(portal: Portal) {
         service_starts_at: string | null;
         estimated_restoration_at: string | null;
         image_data_url: string | null;
+       area_locations_json: string;
       } | undefined;
       if (!advisory) return res.status(404).json({ error: "Advisory not found." });
       try {
+        const savedAreaLabels = (JSON.parse(advisory.area_locations_json) as Array<{ area: string }>)
+          .map(location => location.area);
+        const isPurokTargeted = savedAreaLabels.length > 0 &&
+          savedAreaLabels.every(label => /^.+ · Purok (10|[1-9])$/i.test(label));
         const recipientProfiles = supabaseConfigured()
-          ? await syncResidentProfiles(supabaseAdmin())
-          : undefined;
+          ? await scheduledRecipients(supabaseAdmin(), advisory.reference)
+          : isPurokTargeted ? localResidentsForAreas(savedAreaLabels) : undefined;
         // ADDED: Pass the originally saved image before the `failedOnly` flag.
         const emailDelivery = await deliverAdvisoryEmails(
           portal,
@@ -1316,7 +1446,8 @@ export function startScheduledAnnouncementWorker(portal: Exclude<Portal, "reside
     try {
       const due = database.prepare(`
         SELECT id, reference, title, type, area, details, location, service_status,
-          provider, service_starts_at, estimated_restoration_at, image_data_url, channels_json
+          provider, service_starts_at, estimated_restoration_at, image_data_url, channels_json,
+          area_locations_json
         FROM advisories
         WHERE utility = ? AND publication_status = 'scheduled'
           AND datetime(scheduled_at) <= datetime('now')
@@ -1335,6 +1466,7 @@ export function startScheduledAnnouncementWorker(portal: Exclude<Portal, "reside
         estimated_restoration_at: string | null;
         image_data_url: string | null;
         channels_json: string;
+        area_locations_json: string;
       }>;
 
       const claimed: typeof due = [];

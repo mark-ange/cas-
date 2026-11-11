@@ -126,7 +126,7 @@ test("resident report submission is temporarily disabled", async () => {
   }
 });
 
-test("resident profiles preserve location and every resident receives inbox alerts across areas", async () => {
+test("resident alerts target only residents in the selected affected Puroks", async () => {
   const residentApi = await startApi("resident");
   const cepalcoApi = await startApi("cepalco");
   const waterApi = await startApi("water");
@@ -189,6 +189,15 @@ test("resident profiles preserve location and every resident receives inbox aler
     purok: "2",
   });
   assert.equal(otherAreaRegistration.response.status, 201);
+  const otherAreaToken = otherAreaRegistration.result.token as string;
+  const noPurokRegistration = await jsonRequest(`${residentApi}/auth/register`, "POST", {
+    ...registrationFields,
+    name: "Resident Without a Purok",
+    email: "no-purok@example.test",
+    purok: "",
+  });
+  assert.equal(noPurokRegistration.response.status, 201);
+  const noPurokToken = noPurokRegistration.result.token as string;
 
   const cepalcoLogin = await jsonRequest(`${cepalcoApi}/auth/login`, "POST", {
     email: "admin@cepalco.local",
@@ -265,7 +274,7 @@ test("resident profiles preserve location and every resident receives inbox aler
     channels: ["sms"],
   }, cepalcoToken);
   assert.equal(smsAnnouncement.response.status, 201, JSON.stringify(smsAnnouncement.result));
-  assert.equal(smsAnnouncement.result.smsQueued, 3);
+  assert.equal(smsAnnouncement.result.smsQueued, 4);
   assert.equal(smsAnnouncement.result.location, "Carmen, Cagayan de Oro City");
   assert.equal(smsAnnouncement.result.latitude, mapPin.latitude);
   assert.equal(smsAnnouncement.result.longitude, mapPin.longitude);
@@ -329,6 +338,16 @@ test("resident profiles preserve location and every resident receives inbox aler
   assert.equal(purokAnnouncement.response.status, 201, JSON.stringify(purokAnnouncement.result));
   assert.deepEqual(purokAnnouncement.result.areas, purokAreas);
   assert.deepEqual(purokAnnouncement.result.areaLocations, purokAreas.map(area => ({ area, ...mapPin })));
+  assert.equal(purokAnnouncement.result.smsQueued, 2);
+  const affectedResidentInbox = await jsonRequest(`${residentApi}/inbox`, "GET", undefined, optedInToken);
+  assert.ok((affectedResidentInbox.result as unknown as Array<Record<string, unknown>>)
+    .some(item => item.reference === purokAnnouncement.result.reference));
+  const otherBarangayInbox = await jsonRequest(`${residentApi}/inbox`, "GET", undefined, otherAreaToken);
+  assert.ok(!(otherBarangayInbox.result as unknown as Array<Record<string, unknown>>)
+    .some(item => item.reference === purokAnnouncement.result.reference));
+  const noPurokInbox = await jsonRequest(`${residentApi}/inbox`, "GET", undefined, noPurokToken);
+  assert.ok(!(noPurokInbox.result as unknown as Array<Record<string, unknown>>)
+    .some(item => item.reference === purokAnnouncement.result.reference));
   const immediateResidentInbox = await jsonRequest(`${residentApi}/inbox`, "GET", undefined, optedInToken);
   assert.equal(immediateResidentInbox.response.status, 200);
   const simulatedNotice = (immediateResidentInbox.result as unknown as Array<Record<string, unknown>>)
@@ -450,7 +469,7 @@ test("resident profiles preserve location and every resident receives inbox aler
     assert.equal(facebookAdvisory.response.status, 201);
     assert.equal(facebookAdvisory.result.facebookUrl, "https://www.facebook.com/test-page/posts/456");
     assert.equal(facebookAdvisory.result.instagramUrl, "https://www.instagram.com/p/test-post/");
-    assert.equal(facebookAdvisory.result.smsQueued, 3);
+    assert.equal(facebookAdvisory.result.smsQueued, 4);
     assert.deepEqual(facebookAdvisory.result.channels, ["facebook", "instagram"]);
     assert.match(instagramCaption, /More information: https:\/\/utility\.example\.test\/notices\/456/);
     assert.equal(instagramPermalinkAttempts, 2);
@@ -666,8 +685,9 @@ test("resident profiles preserve location and every resident receives inbox aler
   assert.equal(preservedLocation.purok, registrationFields.purok);
   const optedOutResidentId = (database.prepare("SELECT id FROM users WHERE email = ?").get("not-opted-in@example.test") as { id: number }).id;
   const otherAreaResidentId = (database.prepare("SELECT id FROM users WHERE email = ?").get("other-area@example.test") as { id: number }).id;
+  const noPurokResidentId = (database.prepare("SELECT id FROM users WHERE email = ?").get("no-purok@example.test") as { id: number }).id;
   const simulatedSmsRows = database.prepare("SELECT resident_id FROM sms_deliveries WHERE advisory_id = ?").all(scheduledId) as Array<{ resident_id: number }>;
-  assert.deepEqual(simulatedSmsRows.map(row => row.resident_id).sort(), [residentId, optedOutResidentId, otherAreaResidentId].sort());
+  assert.deepEqual(simulatedSmsRows.map(row => row.resident_id).sort(), [residentId, optedOutResidentId, otherAreaResidentId, noPurokResidentId].sort());
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM sms_deliveries WHERE advisory_id = ? AND resident_id IN (SELECT id FROM users WHERE role != 'resident')").get(scheduledId)?.count, 0);
   const residentInbox = await jsonRequest(`${residentApi}/inbox`, "GET", undefined, optedInToken);
   assert.equal(residentInbox.response.status, 200, JSON.stringify(residentInbox.result));
@@ -679,7 +699,6 @@ test("resident profiles preserve location and every resident receives inbox aler
   assert.ok((optedOutInbox.result as unknown as Array<Record<string, unknown>>).some(
     item => item.reference === scheduledReference && item.status === "Simulated",
   ));
-  const otherAreaToken = otherAreaRegistration.result.token as string;
   const otherAreaInbox = await jsonRequest(`${residentApi}/inbox`, "GET", undefined, otherAreaToken);
   assert.equal(otherAreaInbox.response.status, 200);
   assert.ok((otherAreaInbox.result as unknown as Array<Record<string, unknown>>).some(
@@ -736,7 +755,9 @@ test("resident profiles preserve location and every resident receives inbox aler
   const advisory = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
     ...mapPin,
     title: "Power interruption notice",
-    area: "Carmen",
+    area: "Carmen · Purok 4",
+    areas: ["Carmen · Purok 4"],
+    areaLocations: [{ area: "Carmen · Purok 4", ...mapPin }],
     type: "Outage",
     details: "Full announcement text and safety information.",
     channels: ["facebook", "gmail"],
@@ -746,10 +767,10 @@ test("resident profiles preserve location and every resident receives inbox aler
   const delivery = advisory.result.emailDelivery as Record<string, unknown>;
   assert.equal(delivery.status, "failed");
   assert.equal(delivery.sent, 0);
-  assert.equal(delivery.failed, 3);
+  assert.equal(delivery.failed, 2);
   assert.deepEqual(
     (delivery.deliveries as Array<Record<string, unknown>>).map(item => item.recipientName).sort(),
-    ["Consenting Resident", "Nonconsenting Resident", "Resident in Another Barangay"],
+    ["Consenting Resident", "Nonconsenting Resident"],
   );
   assert.ok((advisory.result.channels as string[]).includes("facebook"));
   assert.ok((advisory.result.channels as string[]).includes("gmail"));
@@ -760,8 +781,8 @@ test("resident profiles preserve location and every resident receives inbox aler
     cepalcoToken,
   );
   assert.equal(deliveryStatus.response.status, 200);
-  assert.equal(deliveryStatus.result.failed, 3);
-  assert.equal((deliveryStatus.result.deliveries as Array<Record<string, unknown>>).length, 3);
+  assert.equal(deliveryStatus.result.failed, 2);
+  assert.equal((deliveryStatus.result.deliveries as Array<Record<string, unknown>>).length, 2);
   const retry = await jsonRequest(
     `${cepalcoApi}/advisories/${advisory.result.id}/email-delivery/retry`,
     "POST",
@@ -769,7 +790,7 @@ test("resident profiles preserve location and every resident receives inbox aler
     cepalcoToken,
   );
   assert.equal(retry.response.status, 200);
-  assert.equal(retry.result.failed, 3);
+  assert.equal(retry.result.failed, 2);
   assert.ok((retry.result.deliveries as Array<Record<string, unknown>>).every(item => item.attempts === 2));
 
   const latestResidentAdvisories = await jsonRequest(`${residentApi}/advisories`);
