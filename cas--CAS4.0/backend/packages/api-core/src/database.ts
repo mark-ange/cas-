@@ -197,6 +197,7 @@ for (const [name, definition] of [
   ["scheduled_at", "TEXT"],
   ["publication_status", "TEXT NOT NULL DEFAULT 'published'"],
   ["channels_json", "TEXT NOT NULL DEFAULT '[]'"],
+  ["area_locations_json", "TEXT NOT NULL DEFAULT '[]'"],
   ["priority", "TEXT NOT NULL DEFAULT 'Normal'"],
   ["location", "TEXT NOT NULL DEFAULT ''"],
   ["service_status", "TEXT NOT NULL DEFAULT 'Upcoming Maintenance Interruption'"],

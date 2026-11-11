@@ -11,6 +11,11 @@ function toCamel(row: Record<string, unknown>): Record<string, unknown> {
   ]));
 }
 
+function isMissingAreaLocationsColumn(error: { code?: string; message?: string }): boolean {
+  return (error.code === "42703" || error.code === "PGRST204") &&
+    /area_locations/i.test(error.message ?? "");
+}
+
 function advisoryFromRow(row: Record<string, unknown>): Advisory {
   const channels = Array.isArray(row.channels)
     ? row.channels.filter((channel): channel is string => typeof channel === "string")
@@ -22,6 +27,16 @@ function advisoryFromRow(row: Record<string, unknown>): Advisory {
     utility: String(row.utility ?? ""),
     type: String(row.type ?? ""),
     area: String(row.area ?? ""),
+    areaLocations: Array.isArray(row.area_locations)
+      ? row.area_locations.flatMap(location => {
+          if (!location || typeof location !== "object") return [];
+          const item = location as Record<string, unknown>;
+          if (typeof item.area !== "string" ||
+              typeof item.latitude !== "number" || !Number.isFinite(item.latitude) ||
+              typeof item.longitude !== "number" || !Number.isFinite(item.longitude)) return [];
+          return [{ area: item.area, latitude: item.latitude, longitude: item.longitude }];
+        })
+      : undefined,
     status: String(row.status ?? "Active") as Status,
     details: String(row.details ?? ""),
     location: String(row.location ?? ""),
@@ -203,14 +218,25 @@ export async function supabaseAction<T>(
     const advisories: Record<string, unknown>[] = [];
     const pageSize = 100;
     for (let from = 0; ; from += pageSize) {
-      let query = supabase.from("advisories")
-        .select("id,reference,title,utility,type,area,status,details,location,service_status,provider,priority,service_starts_at,estimated_restoration_at,created_at,latitude,longitude,scheduled_at,publication_status,channels")
+      let advisoryQuery = supabase.from("advisories")
+        .select("id,reference,title,utility,type,area,status,details,location,service_status,provider,priority,service_starts_at,estimated_restoration_at,created_at,latitude,longitude,area_locations,scheduled_at,publication_status,channels")
         .order("id", { ascending: false })
         .range(from, from + pageSize - 1);
-      if (utility) query = query.eq("utility", utility);
-      const { data, error } = await query;
-      if (error) throw new Error(error.message);
-      const rows = (data ?? []) as Record<string, unknown>[];
+      if (utility) advisoryQuery = advisoryQuery.eq("utility", utility);
+      const advisoryResult = await advisoryQuery;
+      let queryError = advisoryResult.error;
+      let rows = (advisoryResult.data ?? []) as Record<string, unknown>[];
+      if (queryError && isMissingAreaLocationsColumn(queryError)) {
+        let legacyQuery = supabase.from("advisories")
+          .select("id,reference,title,utility,type,area,status,details,location,service_status,provider,priority,service_starts_at,estimated_restoration_at,created_at,latitude,longitude,scheduled_at,publication_status,channels")
+          .order("id", { ascending: false })
+          .range(from, from + pageSize - 1);
+        if (utility) legacyQuery = legacyQuery.eq("utility", utility);
+        const legacyResult = await legacyQuery;
+        queryError = legacyResult.error;
+        rows = (legacyResult.data ?? []) as Record<string, unknown>[];
+      }
+      if (queryError) throw new Error(queryError.message);
       advisories.push(...rows);
       const ids = rows.map(row => Number(row.id));
       if (ids.length) {
@@ -236,7 +262,7 @@ export async function supabaseAction<T>(
   if (path === "/advisories" && method === "POST") {
     await profileForPortal();
     const scheduledAt = String(body.scheduledAt ?? "") || null;
-    const { data, error } = await supabase.from("advisories").insert({
+    const advisoryPayload = {
       reference: `${portal === "water" ? "WD" : "CE"}-${Date.now().toString(36).toUpperCase()}`,
       title: body.title,
       utility,
@@ -255,23 +281,33 @@ export async function supabaseAction<T>(
         : body.imageDataUrl || null,
       latitude: body.latitude || null,
       longitude: body.longitude || null,
+      area_locations: body.areaLocations ?? [],
       scheduled_at: scheduledAt,
       publication_status: scheduledAt ? "scheduled" : "published",
       channels: body.channels ?? [],
-    }).select("id,reference,title,utility,type,area,status,details,location,service_status,provider,priority,service_starts_at,estimated_restoration_at,created_at,latitude,longitude,scheduled_at,publication_status,channels").single();
+    };
+    const { data, error } = await supabase.from("advisories").insert(advisoryPayload)
+      .select("id,reference,title,utility,type,area,status,details,location,service_status,provider,priority,service_starts_at,estimated_restoration_at,created_at,latitude,longitude,scheduled_at,publication_status,channels").single();
+    if (error && isMissingAreaLocationsColumn(error)) {
+      throw new Error("Supabase is missing the area_locations column. Apply supabase/migrations/20261111000200_advisory_area_locations.sql before publishing multi-area advisories.");
+    }
     if (error) throw new Error(error.message);
     await recordActivity(scheduledAt ? "Advisory scheduled" : "Advisory prepared", Number(data.id), `${String(body.title)} — ${String(body.area)}; channels: ${(body.channels as string[] | undefined)?.join(", ") ?? "none"}.`);
     let delivery: Record<string, unknown> | null = null;
     {
       const apiBaseUrl = ({
-        resident: import.meta.env.VITE_RESIDENT_API_URL || "http://localhost:4101",
-        cepalco: import.meta.env.VITE_CEPALCO_API_URL || "http://localhost:4102",
-        water: import.meta.env.VITE_WATER_API_URL || "http://localhost:4103",
+        resident: import.meta.env.VITE_RESIDENT_API_URL || "/api/resident",
+        cepalco: import.meta.env.VITE_CEPALCO_API_URL || "/api/cepalco",
+        water: import.meta.env.VITE_WATER_API_URL || "/api/water",
       })[portal].replace(/\/+$/, "");
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) throw new Error("Your Supabase session expired after the advisory was saved. Sign in again to send it.");
       const response = await fetch(`${apiBaseUrl}/advisories/${data.id}/deliver`, {
         method: "POST",
+        body: new Blob([JSON.stringify({
+          areas: body.areas,
+          areaLocations: body.areaLocations,
+        })], { type: "application/json" }),
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       const deliveryResult: unknown = await response.json();
@@ -333,17 +369,7 @@ export async function supabaseAction<T>(
   }
 
   if (path === "/reports" && method === "POST") {
-    const profile = await profileForPortal();
-    const { data, error } = await supabase.from("reports").insert({
-      reference: `CAS-R-${Date.now().toString(36).toUpperCase()}`,
-      user_id: profile.id,
-      title: body.issue,
-      utility: body.utility,
-      area: body.area,
-      details: body.details ?? "",
-    }).select("id,reference,user_id,title,utility,area,details,status,created_at").single();
-    if (error) throw new Error(error.message);
-    return toCamel(data) as T;
+    throw new Error("Resident issue reports are temporarily unavailable.");
   }
 
   if (path === "/reports" && method === "GET") {

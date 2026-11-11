@@ -35,6 +35,7 @@ create table public.advisories (
   image_data_url text,
   latitude double precision,
   longitude double precision,
+  area_locations jsonb not null default '[]'::jsonb,
   scheduled_at timestamptz,
   publication_status text not null default 'published'
     check (publication_status in ('scheduled', 'publishing', 'published', 'failed')),

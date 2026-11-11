@@ -13,6 +13,7 @@ export type PortalSettings = {
   modalTitles: Record<"advisory" | "work", string>;
   barangays?: string[];
   districts?: string[];
+  locationDefaults?: { city: string; postalCode: string };
   publicNavigation?: string[];
   registerHighlights?: Array<{ icon: string; title: string; detail: string }>;
   filters?: Record<string, string[]>;
@@ -52,6 +53,7 @@ export type Advisory = {
   utility: string;
   type: string;
   area: string;
+  areaLocations?: Array<{ area: string; latitude: number; longitude: number }>;
   status: Status;
   details: string;
   location?: string;

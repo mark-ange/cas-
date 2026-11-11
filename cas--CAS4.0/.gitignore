@@ -1,6 +1,7 @@
 node_modules/
 dist/
 backend/data/
+**/backend/data/
 .env
 
 # Local environment files and secrets

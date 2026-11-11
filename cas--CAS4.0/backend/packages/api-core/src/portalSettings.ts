@@ -34,17 +34,18 @@ export const portalSettings = {
     brand: "Community Alert System (CAS)",
     color: "red",
     navigation: [
-      { key: "overview", label: "My community", icon: "home" },
-      { key: "advisories", label: "Local service updates", icon: "alert" },
-      { key: "inbox", label: "My alerts", icon: "messages" },
-      { key: "services", label: "Power & water status", icon: "water" },
-      { key: "profile", label: "My profile", icon: "people" },
+      { key: "overview", label: "Dashboard", icon: "home" },
+      { key: "inbox", label: "Notifications", icon: "messages" },
+      { key: "services", label: "Map View", icon: "map" },
+      { key: "about", label: "About", icon: "info" },
+      { key: "profile", label: "Settings", icon: "settings" },
     ],
     pageTitles: {
       overview: "My community",
       advisories: "Local service updates",
       inbox: "My alerts",
       services: "Power & water status",
+      about: "About Community Alert System",
       profile: "My profile",
     },
     pageDescriptions: {
@@ -52,6 +53,7 @@ export const portalSettings = {
       advisories: "The latest power and water service updates for your area.",
       inbox: "See alerts sent to your account here. These are in-app messages; no text messages are sent to your phone.",
       services: "Check the current service status for your utility providers.",
+      about: "Learn how the Community Alert System keeps Cagayan de Oro residents informed.",
       profile: "Manage your contact details and service location. Utility announcements are sent to all residents.",
     },
     sidebarLabel: "RESIDENT SERVICES",
@@ -104,15 +106,18 @@ export const portalSettings = {
     navigation: [
       { key: "overview", label: "Overview", icon: "home" },
       { key: "incidents", label: "Active disruptions", icon: "alert" },
+      { key: "residents", label: "Resident reports", icon: "messages" },
     ],
     pageTitles: {
       overview: "Operations overview",
       incidents: "Active disruptions",
+      residents: "Resident reports",
       publish: "Create announcement",
     },
     pageDescriptions: {
       overview: "Your service area status and latest verified community updates.",
       incidents: "Review current power interruptions and their status.",
+      residents: "Review service reports submitted by residents.",
       publish: "Write a clear service update, choose where to share it, and publish now or schedule it.",
     },
     sidebarLabel: "CEPALCO OPERATIONS",
@@ -141,6 +146,8 @@ export const portalSettings = {
     navigation: [
       { key: "overview", label: "Overview", icon: "home" },
       { key: "incidents", label: "Water advisories", icon: "alert" },
+      { key: "residents", label: "Resident reports", icon: "messages" },
+      { key: "restoration", label: "Network map", icon: "map" },
     ],
     pageTitles: {
       overview: "Water service overview",

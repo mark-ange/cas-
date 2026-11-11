@@ -29,6 +29,7 @@ const [{ createApi, startScheduledAnnouncementWorker }, { database }] = await Pr
   import("./database.js"),
 ]);
 const servers: Server[] = [];
+const mapPin = { latitude: 8.4542, longitude: 124.6319 };
 
 async function startApi(portal: "resident" | "cepalco" | "water"): Promise<string> {
   const server = createApi(portal).listen(0, "127.0.0.1");
@@ -70,7 +71,9 @@ test("public portal content includes settings for every portal", async () => {
   assert.equal(portalSettings.resident.label, "Resident");
   assert.equal(portalSettings.cepalco.label, "CEPALCO");
   assert.equal(portalSettings.water.label, "Water District");
-  assert.ok((portalSettings.resident.navigation as Array<{ key: string }>).some(item => item.key === "inbox"));
+  const residentNavigation = (portalSettings.resident.navigation as Array<{ key: string }>).map(item => item.key);
+  assert.deepEqual(residentNavigation, ["overview", "inbox", "services", "about", "profile"]);
+  assert.ok(!residentNavigation.some(key => ["publish", "incidents", "residents", "restoration"].includes(key)));
   assert.ok(!(portalSettings.cepalco.navigation as Array<{ key: string }>).some(item => item.key === "inbox"));
   assert.ok(!(portalSettings.water.navigation as Array<{ key: string }>).some(item => item.key === "inbox"));
   for (const key of ["smsInboxDisclaimer", "smsInboxEmpty", "smsInboxStatusSimulated", "smsInboxStatusRead", "smsInboxStatusUnread", "smsInboxMarkRead"]) {
@@ -78,12 +81,49 @@ test("public portal content includes settings for every portal", async () => {
   }
   assert.deepEqual(
     (portalSettings.cepalco.navigation as Array<{ key: string }>).map(item => item.key),
-    ["overview", "incidents"],
+    ["overview", "incidents", "residents"],
   );
   assert.deepEqual(
     (portalSettings.water.navigation as Array<{ key: string }>).map(item => item.key),
-    ["overview", "incidents"],
+    ["overview", "incidents", "residents", "restoration"],
   );
+});
+
+test("resident report submission is temporarily disabled", async () => {
+  const residentApi = await startApi("resident");
+  const report = { utility: "CEPALCO", issue: "Intermittent power", area: "Carmen", details: "Observed this morning." };
+  const anonymousSubmission = await jsonRequest(`${residentApi}/reports`, "POST", report);
+  assert.equal(anonymousSubmission.response.status, 401);
+
+  const registration = await jsonRequest(`${residentApi}/auth/register`, "POST", {
+    name: "Report Test Resident",
+    email: "report-test@example.test",
+    password: "resident-test-password",
+    phoneNumber: "09170000000",
+    address: "Test address",
+    barangay: "Carmen",
+    purok: "",
+    district: "1st District",
+    city: "Cagayan de Oro City",
+    postalCode: "9000",
+    termsAccepted: true,
+  });
+  assert.equal(registration.response.status, 201);
+  assert.equal(typeof registration.result.token, "string");
+
+  const actor = registration.result.actor as Record<string, unknown>;
+  const residentId = Number(actor.id);
+  try {
+    const submission = await jsonRequest(`${residentApi}/reports`, "POST", report, String(registration.result.token));
+    assert.equal(submission.response.status, 403);
+    assert.match(String(submission.result.error), /temporarily unavailable/i);
+    const mine = await jsonRequest(`${residentApi}/reports/mine`, "GET", undefined, String(registration.result.token));
+    assert.equal(mine.response.status, 200);
+    assert.deepEqual(mine.result, []);
+  } finally {
+    database.prepare("DELETE FROM reports WHERE user_id = ?").run(residentId);
+    database.prepare("DELETE FROM users WHERE id = ?").run(residentId);
+  }
 });
 
 test("resident profiles preserve location and every resident receives inbox alerts across areas", async () => {
@@ -167,6 +207,24 @@ test("resident profiles preserve location and every resident receives inbox aler
   assert.equal(typeof socialStatus.result.instagram, "boolean");
   assert.equal(socialStatus.result.instagramTokenSource, "missing");
 
+  const missingMapPin = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    title: "Missing map pin",
+    area: "Carmen",
+    details: "This announcement must not be published without a map pin.",
+    channels: ["sms"],
+  }, cepalcoToken);
+  assert.equal(missingMapPin.response.status, 400);
+  assert.match(String(missingMapPin.result.error), /pin on the map before publishing or scheduling/);
+  const missingScheduledMapPin = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    title: "Scheduled notice missing map pin",
+    area: "Carmen",
+    details: "Scheduled notices also require a map pin.",
+    channels: ["sms"],
+    scheduledAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+  }, cepalcoToken);
+  assert.equal(missingScheduledMapPin.response.status, 400);
+  assert.match(String(missingScheduledMapPin.result.error), /pin on the map before publishing or scheduling/);
+
   const socialEnv = [
     "CEPALCO_META_FACEBOOK_PAGE_ACCESS_TOKEN",
     "CEPALCO_META_INSTAGRAM_ACCESS_TOKEN",
@@ -193,6 +251,7 @@ test("resident profiles preserve location and every resident receives inbox aler
   }
 
   const smsAnnouncement = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    ...mapPin,
     title: "Test simulated alert",
     type: "Scheduled maintenance",
     area: "Carmen",
@@ -208,6 +267,8 @@ test("resident profiles preserve location and every resident receives inbox aler
   assert.equal(smsAnnouncement.response.status, 201, JSON.stringify(smsAnnouncement.result));
   assert.equal(smsAnnouncement.result.smsQueued, 3);
   assert.equal(smsAnnouncement.result.location, "Carmen, Cagayan de Oro City");
+  assert.equal(smsAnnouncement.result.latitude, mapPin.latitude);
+  assert.equal(smsAnnouncement.result.longitude, mapPin.longitude);
   assert.equal(smsAnnouncement.result.serviceStatus, "Upcoming Maintenance Interruption");
   assert.equal(smsAnnouncement.result.provider, "CEPALCO");
   const savedNoticeList = await jsonRequest(`${cepalcoApi}/advisories`, "GET", undefined, cepalcoToken);
@@ -215,8 +276,59 @@ test("resident profiles preserve location and every resident receives inbox aler
     .find(item => item.reference === smsAnnouncement.result.reference);
   assert.ok(savedNotice);
   assert.equal(savedNotice.location, "Carmen, Cagayan de Oro City");
+  assert.equal(savedNotice.latitude, mapPin.latitude);
+  assert.equal(savedNotice.longitude, mapPin.longitude);
   assert.equal(savedNotice.serviceStatus, "Upcoming Maintenance Interruption");
   assert.equal(savedNotice.provider, "CEPALCO");
+  const residentMapAdvisories = await jsonRequest(`${residentApi}/advisories`);
+  const residentMapNotice = (residentMapAdvisories.result as unknown as Array<Record<string, unknown>>)
+    .find(item => item.id === smsAnnouncement.result.id);
+  assert.equal(residentMapNotice?.latitude, mapPin.latitude);
+  assert.equal(residentMapNotice?.longitude, mapPin.longitude);
+  const multiAreaAnnouncement = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    title: "Multi-area test advisory",
+    type: "Scheduled maintenance",
+    areas: ["Carmen", "Bugo"],
+    area: "Carmen, Bugo",
+    areaLocations: [
+      { area: "Carmen", latitude: 8.4542, longitude: 124.6319 },
+      { area: "Bugo", latitude: 8.519, longitude: 124.75 },
+    ],
+    location: "Carmen, Cagayan de Oro City",
+    serviceStatus: "Upcoming Maintenance Interruption",
+    provider: "CEPALCO",
+    details: "This advisory affects multiple service areas.",
+    priority: "High",
+    channels: ["sms"],
+  }, cepalcoToken);
+  assert.equal(multiAreaAnnouncement.response.status, 201, JSON.stringify(multiAreaAnnouncement.result));
+  assert.equal(multiAreaAnnouncement.result.area, "Carmen, Bugo");
+  assert.deepEqual(multiAreaAnnouncement.result.areas, ["Carmen", "Bugo"]);
+  assert.deepEqual(multiAreaAnnouncement.result.areaLocations, [
+    { area: "Carmen", latitude: 8.4542, longitude: 124.6319 },
+    { area: "Bugo", latitude: 8.519, longitude: 124.75 },
+  ]);
+  const savedMultiAreaAdvisory = await jsonRequest(`${cepalcoApi}/advisories`, "GET", undefined, cepalcoToken);
+  const savedMultiAreaNotice = (savedMultiAreaAdvisory.result as unknown as Array<Record<string, unknown>>)
+    .find(item => item.id === multiAreaAnnouncement.result.id);
+  assert.deepEqual(savedMultiAreaNotice?.areaLocations, multiAreaAnnouncement.result.areaLocations);
+  const purokAreas = Array.from({ length: 10 }, (_, index) => `Carmen · Purok ${index + 1}`);
+  const purokAnnouncement = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    title: "Multiple Purok test advisory",
+    type: "Scheduled maintenance",
+    areas: purokAreas,
+    area: purokAreas.join(", "),
+    areaLocations: purokAreas.map(area => ({ area, ...mapPin })),
+    location: "Carmen, Cagayan de Oro City",
+    serviceStatus: "Upcoming Maintenance Interruption",
+    provider: "CEPALCO",
+    details: "This advisory affects multiple Puroks within one barangay.",
+    priority: "High",
+    channels: ["sms"],
+  }, cepalcoToken);
+  assert.equal(purokAnnouncement.response.status, 201, JSON.stringify(purokAnnouncement.result));
+  assert.deepEqual(purokAnnouncement.result.areas, purokAreas);
+  assert.deepEqual(purokAnnouncement.result.areaLocations, purokAreas.map(area => ({ area, ...mapPin })));
   const immediateResidentInbox = await jsonRequest(`${residentApi}/inbox`, "GET", undefined, optedInToken);
   assert.equal(immediateResidentInbox.response.status, 200);
   const simulatedNotice = (immediateResidentInbox.result as unknown as Array<Record<string, unknown>>)
@@ -262,6 +374,8 @@ test("resident profiles preserve location and every resident receives inbox aler
   let facebookAttachedMedia: string[] = [];
   let instagramCarouselChildren: string[] = [];
   let instagramChildCount = 0;
+  let instagramSourceImageUrl = "";
+  let instagramCaption = "";
   let instagramStatusChecks = 0;
   let instagramPermalinkAttempts = 0;
   const graphVersions = new Set<string>();
@@ -288,6 +402,9 @@ test("resident profiles preserve location and every resident receives inbox aler
     }
     if (url.hostname === "graph.facebook.com" && init?.method === "POST" && url.pathname.endsWith("/media")) {
       const body = init.body instanceof URLSearchParams ? init.body : null;
+      if (body?.get("caption")) instagramCaption = body.get("caption")!;
+      if (body?.get("image_url")) instagramSourceImageUrl = body.get("image_url")!;
+      if (body?.get("caption")?.includes("network failure test")) throw new TypeError("fetch failed");
       if (body?.get("is_carousel_item") === "true") {
         instagramChildCount += 1;
         return new Response(JSON.stringify({ id: `test-instagram-child-${instagramChildCount}` }), { status: 200 });
@@ -322,9 +439,11 @@ test("resident profiles preserve location and every resident receives inbox aler
   };
   try {
     const facebookAdvisory = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+      ...mapPin,
       title: "Facebook link test",
       area: "Carmen",
       details: "Verify stored social post links.",
+      informationUrl: "https://utility.example.test/notices/456",
       imageDataUrl: "data:image/png;base64,iVBORw0KGgo=",
       channels: ["facebook", "instagram"],
     }, cepalcoToken);
@@ -333,6 +452,7 @@ test("resident profiles preserve location and every resident receives inbox aler
     assert.equal(facebookAdvisory.result.instagramUrl, "https://www.instagram.com/p/test-post/");
     assert.equal(facebookAdvisory.result.smsQueued, 3);
     assert.deepEqual(facebookAdvisory.result.channels, ["facebook", "instagram"]);
+    assert.match(instagramCaption, /More information: https:\/\/utility\.example\.test\/notices\/456/);
     assert.equal(instagramPermalinkAttempts, 2);
     assert.equal(facebookPermalinkAttempts, 2);
     assert.equal(instagramStatusChecks, 2);
@@ -347,8 +467,35 @@ test("resident profiles preserve location and every resident receives inbox aler
     assert.ok(socialMessage);
     assert.match(String(socialMessage.body), /Facebook: https:\/\/www\.facebook\.com\/test-page\/posts\/456/);
     assert.match(String(socialMessage.body), /Instagram: https:\/\/www\.instagram\.com\/p\/test-post\//);
+    assert.match(String(socialMessage.body), /More information: https:\/\/utility\.example\.test\/notices\/456/);
+
+    const invalidLinkAdvisory = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+      ...mapPin,
+      title: "Invalid information link",
+      area: "Carmen",
+      details: "This should be rejected.",
+      informationUrl: "http://utility.example.test/notices",
+      imageDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+      channels: ["gmail"],
+    }, cepalcoToken);
+    assert.equal(invalidLinkAdvisory.response.status, 400);
+    assert.match(String(invalidLinkAdvisory.result.error), /must use HTTPS/);
+
+    const failedInstagramAdvisory = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+      ...mapPin,
+      title: "network failure test",
+      area: "Carmen",
+      details: "Verify Meta connectivity diagnostics.",
+      imageDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+      channels: ["instagram"],
+    }, cepalcoToken);
+    assert.equal(failedInstagramAdvisory.response.status, 201);
+    const failedInstagram = (failedInstagramAdvisory.result.socialDelivery as { platforms: Array<{ message?: string }> }).platforms[0];
+    assert.match(String(failedInstagram.message), /create an Instagram image container/);
+    assert.match(String(failedInstagram.message), /outbound HTTPS access/);
 
     const multiImageSocialAdvisory = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+      ...mapPin,
       title: "Multi-image social post",
       area: "Carmen",
       details: "Publish this set as Facebook and Instagram carousels.",
@@ -367,6 +514,7 @@ test("resident profiles preserve location and every resident receives inbox aler
     assert.ok(graphVersions.has("v26.0"));
 
     const facebookOnlyAdvisory = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+      ...mapPin,
       title: "Facebook-only advisory",
       area: "Carmen",
       details: "Retry Instagram publishing from the admin card.",
@@ -375,10 +523,18 @@ test("resident profiles preserve location and every resident receives inbox aler
     }, cepalcoToken);
     assert.equal(facebookOnlyAdvisory.response.status, 201);
     const facebookAlbumCountBeforeRetry = facebookAlbumPhotoCount;
+    const invalidInstagramRetry = await jsonRequest(
+      `${cepalcoApi}/advisories/${facebookOnlyAdvisory.result.id}/social-publish`,
+      "POST",
+      { platforms: ["instagram"], imageDataUrls: [] },
+      cepalcoToken,
+    );
+    assert.equal(invalidInstagramRetry.response.status, 400);
+    assert.match(String(invalidInstagramRetry.result.error), /match the advisory's saved image count/);
     const instagramRetry = await jsonRequest(
       `${cepalcoApi}/advisories/${facebookOnlyAdvisory.result.id}/social-publish`,
       "POST",
-      { platforms: ["instagram"] },
+      { platforms: ["instagram"], imageDataUrls: ["data:image/jpeg;base64,/9j/2Q=="] },
       cepalcoToken,
     );
     assert.equal(instagramRetry.response.status, 200);
@@ -387,6 +543,10 @@ test("resident profiles preserve location and every resident receives inbox aler
     assert.equal(retriedPlatforms[0].status, "published");
     assert.equal(facebookAlbumPhotoCount, facebookAlbumCountBeforeRetry);
     assert.equal(instagramStatusChecks, 6);
+    const normalizedRetryImage = await fetch(`${cepalcoApi}/advisories/${facebookOnlyAdvisory.result.id}/image`);
+    assert.equal(normalizedRetryImage.status, 200);
+    assert.match(normalizedRetryImage.headers.get("content-type") ?? "", /image\/jpeg/);
+    assert.match(instagramSourceImageUrl, /\/advisories\/\d+\/image\?v=[a-f0-9]{12}$/);
   } finally {
     globalThis.fetch = previousFetch;
     if (previousMetaEnvironment.pageId === undefined) delete process.env.META_FACEBOOK_PAGE_ID;
@@ -404,6 +564,7 @@ test("resident profiles preserve location and every resident receives inbox aler
   }
 
   const scheduled = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    ...mapPin,
     title: "Scheduled service update",
     area: "Carmen",
     type: "Maintenance",
@@ -422,6 +583,7 @@ test("resident profiles preserve location and every resident receives inbox aler
   assert.equal(scheduled.result.estimatedRestorationAt, "2026-10-23T12:00:00.000Z");
   assert.equal(scheduled.result.emailDelivery, undefined);
   const identicalWindow = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    ...mapPin,
     title: "Identical service window",
     area: "Carmen",
     details: "Start and restoration times must differ.",
@@ -432,6 +594,7 @@ test("resident profiles preserve location and every resident receives inbox aler
   assert.equal(identicalWindow.response.status, 400);
   assert.match(String(identicalWindow.result.error), /cannot be the same/);
   const distinctEarlierWindow = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    ...mapPin,
     title: "Distinct service window",
     area: "Carmen",
     details: "Different times are accepted even when they are not chronological.",
@@ -441,6 +604,7 @@ test("resident profiles preserve location and every resident receives inbox aler
   }, cepalcoToken);
   assert.equal(distinctEarlierWindow.response.status, 201);
   const invalidPriority = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    ...mapPin,
     title: "Invalid priority",
     area: "Carmen",
     details: "This advisory uses an unsupported priority.",
@@ -450,6 +614,7 @@ test("resident profiles preserve location and every resident receives inbox aler
   assert.equal(invalidPriority.response.status, 400);
   assert.match(String(invalidPriority.result.error), /valid advisory priority/);
   const noChannels = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    ...mapPin,
     title: "No channel selected",
     area: "Carmen",
     details: "This advisory must select a delivery channel.",
@@ -458,6 +623,7 @@ test("resident profiles preserve location and every resident receives inbox aler
   assert.equal(noChannels.response.status, 400);
   assert.match(String(noChannels.result.error), /at least one announcement channel/);
   const freeTextArea = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    ...mapPin,
     title: "Broadcast with free-text affected area",
     area: "Carmen, Purok West",
     details: "Area descriptions do not restrict the audience.",
@@ -466,6 +632,7 @@ test("resident profiles preserve location and every resident receives inbox aler
   assert.equal(freeTextArea.response.status, 201);
   assert.equal(freeTextArea.result.area, "Carmen, Purok West");
   const describedArea = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    ...mapPin,
     title: "Free-text service area test",
     area: "Agusan, Purok 4",
     details: "Affected locations are descriptive and do not limit announcement recipients.",
@@ -537,6 +704,7 @@ test("resident profiles preserve location and every resident receives inbox aler
   assert.equal(residentScheduled?.estimatedRestorationAt, "2026-10-23T12:00:00.000Z");
 
   const multiImageAdvisory = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    ...mapPin,
     title: "Multi-image advisory",
     area: "Carmen",
     details: "Verify all announcement images are available.",
@@ -566,6 +734,7 @@ test("resident profiles preserve location and every resident receives inbox aler
   assert.match(String(connect.result.error), /GMAIL_TOKEN_ENCRYPTION_KEY/);
 
   const advisory = await jsonRequest(`${cepalcoApi}/advisories`, "POST", {
+    ...mapPin,
     title: "Power interruption notice",
     area: "Carmen",
     type: "Outage",

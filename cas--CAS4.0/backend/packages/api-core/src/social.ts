@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 import { parseGmailImageAttachment } from "./gmail.js";
 
@@ -254,7 +255,8 @@ async function waitForInstagramMediaReady(
   accessToken: string,
 ): Promise<{ ready: boolean; message?: string }> {
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    const response = await fetch(
+    const response = await fetchInstagramGraph(
+      "check Instagram image processing status",
       `${graphBase(portal)}/${encodeURIComponent(mediaId)}?fields=status_code,status&access_token=${encodeURIComponent(accessToken)}`,
     );
     const result = await response.json() as {
@@ -283,6 +285,22 @@ async function waitForInstagramMediaReady(
     ready: false,
     message: "Instagram is still processing the image. Wait a little and retry publishing.",
   };
+}
+
+async function fetchInstagramGraph(
+  operation: string,
+  input: string,
+  init?: RequestInit,
+): Promise<Response> {
+  try {
+    return await fetch(input, init);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Network request failed.";
+    const cause = error instanceof Error && "cause" in error && error.cause instanceof Error
+      ? ` (${error.cause.message})`
+      : "";
+    throw new Error(`Could not reach Meta Graph API to ${operation}: ${message}${cause}. Check outbound HTTPS access from the API server.`);
+  }
 }
 
 async function publishToInstagram(
@@ -316,7 +334,8 @@ async function publishToInstagram(
       if (!configuredPublicBaseUrl) {
         return { platform: "instagram", status: "failed", message: "Instagram publishing requires either Supabase Storage or META_PUBLIC_BASE_URL to host the announcement image." };
       }
-      imageUrl = `${configuredPublicBaseUrl.replace(/\/$/, "")}/advisories/${advisoryId}${index === 0 ? "/image" : `/images/${index}`}`;
+      const version = createHash("sha256").update(imageDataUrl).digest("hex").slice(0, 12);
+      imageUrl = `${configuredPublicBaseUrl.replace(/\/$/, "")}/advisories/${advisoryId}${index === 0 ? "/image" : `/images/${index}`}?v=${version}`;
     }
     imageUrls.push(imageUrl);
   }
@@ -330,7 +349,7 @@ async function publishToInstagram(
       activeToken = token;
       let containerResponseOk = false;
       if (imageUrls.length === 1) {
-        const containerResponse = await fetch(`${graphBase(portal)}/${encodeURIComponent(accountId)}/media`, {
+        const containerResponse = await fetchInstagramGraph("create an Instagram image container", `${graphBase(portal)}/${encodeURIComponent(accountId)}/media`, {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({ image_url: imageUrls[0], caption, access_token: token }),
@@ -340,7 +359,7 @@ async function publishToInstagram(
       } else {
         const children: string[] = [];
         for (const imageUrl of imageUrls) {
-          const childResponse = await fetch(`${graphBase(portal)}/${encodeURIComponent(accountId)}/media`, {
+          const childResponse = await fetchInstagramGraph("create an Instagram carousel image", `${graphBase(portal)}/${encodeURIComponent(accountId)}/media`, {
             method: "POST",
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams({ image_url: imageUrl, is_carousel_item: "true", access_token: token }),
@@ -353,7 +372,7 @@ async function publishToInstagram(
           children.push(child.id);
         }
         if (children.length === imageUrls.length) {
-          const carouselResponse = await fetch(`${graphBase(portal)}/${encodeURIComponent(accountId)}/media`, {
+          const carouselResponse = await fetchInstagramGraph("create an Instagram carousel", `${graphBase(portal)}/${encodeURIComponent(accountId)}/media`, {
             method: "POST",
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams({
@@ -385,7 +404,7 @@ async function publishToInstagram(
       return { platform: "instagram", status: "failed", message: readiness.message || "Instagram media is not ready to publish." };
     }
 
-    const publishResponse = await fetch(`${graphBase(portal)}/${encodeURIComponent(accountId)}/media_publish`, {
+    const publishResponse = await fetchInstagramGraph("publish the Instagram media container", `${graphBase(portal)}/${encodeURIComponent(accountId)}/media_publish`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ creation_id: container.id, access_token: activeToken }),

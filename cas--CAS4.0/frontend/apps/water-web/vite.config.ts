@@ -5,6 +5,14 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
+    proxy: {
+      "/api/water": {
+        target: "http://127.0.0.1:4103",
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/api\/water/, ""),
+        configure: proxy => proxy.on("proxyReq", proxyReq => proxyReq.removeHeader("origin")),
+      },
+    },
     fs: {
       allow: [
         searchForWorkspaceRoot(process.cwd()),
